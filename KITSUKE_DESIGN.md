@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.1.12, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.2.0, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -47,11 +47,12 @@ The persistent editable representation is always the set of separate panel
 objects. A permanently joined Blender Mesh cannot support independent Object
 Mode translation and rotation, which are required during dressing.
 
-For each click, Kitsuke performs this round trip:
+For the first click, and after Undo/Redo invalidates a runtime, Kitsuke builds
+the transient indexed state. Every click then performs this round trip:
 
 1. Read current world-space vertices and transforms from all panel objects.
-2. Reconstruct one transient indexed simulation state.
-3. Reconstruct sewing constraints from the verified Sewing preview/session.
+2. Synchronize the live runtime, or reconstruct it when none is valid.
+3. Use sewing constraints from the verified Sewing preview/recovery state.
 4. Advance Taichi stretch, approximate bend, sewing, gravity, Body contact, and
    self-contact constraints.
 5. Scatter positions back by source object and original vertex index.
@@ -59,19 +60,30 @@ For each click, Kitsuke performs this round trip:
 7. Show and select the separate panel objects again.
 
 The initial Sewing preview is both a visual verification object and the record
-from which the first session captures exact seam vertex pairs. Later clicks keep
-that pairing in memory and rebuild only transient constraints.
+from which the first session captures exact seam vertex pairs. Later clicks
+reuse the live Taichi runtime while synchronizing supported Object Mode changes.
+Undo and Redo discard that runtime and reconstruct it from Blender recovery
+data before another click.
 
 ## 4. Transform and state rules
 
 - Translation and rotation in Object Mode are supported.
 - Scaling is rejected because it changes authoritative pattern dimensions.
-- Topology or vertex-count changes are rejected.
+- Scaling and vertex-count changes are rejected. Other direct mesh edits are
+  unsupported but are not yet completely detected; topology belongs in the
+  pattern.
 - An untouched panel retains its per-vertex velocity between clicks.
 - A translated or rotated panel has all its vertex velocities reset to zero.
-- The evaluated Body is captured on the first click and remains constant.
-- Reopening a Blender file does not restore the in-memory Kitsuke session.
-- Restarting/upgrading the add-on requires a fresh Load and Sewing.
+- The evaluated Body is captured when a live session is constructed and remains
+  constant until that session is invalidated.
+- Every successful click stores exact seam pairs and targets, per-vertex
+  velocity, revision, and Object Mode transforms in undoable Blender data.
+- `undo_post` and `redo_post` invalidate the non-undoable Taichi runtime. The
+  next click rebuilds it exactly from Blender's restored same-runtime state.
+- Recovery data carries a process epoch. Reopening Blender or reloading the
+  add-on ignores an older epoch; loading any `.blend` rotates the epoch through
+  `load_pre`. Continuing an abandoned partially dressed session across a
+  restart or file load is unsupported; restart from Load/Sewing.
 
 ## 5. Collision rules
 
@@ -203,6 +215,17 @@ seam closure. Visible local holes show that collision quality is now the primary
 problem: cloth vertices can still cross the Body around high-curvature or
 fast-moving regions such as the shoulder, breast, and abdomen.
 
+### 0.2.0 Undo/Redo synchronization
+
+Blender restores panel meshes during Undo/Redo but cannot restore Python/Taichi
+objects. Each successful Kitsuke click now mirrors the minimum continuation
+state into Blender: exact seam pairs, the seam-rest array, per-part velocity
+point attribute, revision number, runtime epoch, and last accepted Object Mode
+matrix. Undo and Redo handlers clear all live Taichi sessions. The next Kitsuke reconstructs the
+runtime from the restored mesh and recovery data. Regression tests verify both
+click 1/click 2 restoration and repeating click 2 after Undo without skipping a
+30 mm seam-closure stage.
+
 ## 9. Known limitations
 
 - This is stabilized PBD, not a complete XPBD material model.
@@ -214,8 +237,11 @@ fast-moving regions such as the shoulder, breast, and abdomen.
   required before treating collision handling as production-ready.
 - Friction is not yet modeled.
 - Panel mass and textile-specific stretch/bend parameters are not exposed.
-- Runtime state is not serialized.
-- The bundled 0.1.12 distribution is Windows x64 / CPython 3.13.
+- Same-vertex-count topology edits and direct vertex edits are not yet fully
+  detected even though they are unsupported.
+- Live Taichi objects are not serialized. Blender stores only same-runtime
+  Undo/Redo recovery data; cross-restart continuation is unsupported.
+- The bundled 0.2.0 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -226,15 +252,15 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.1.12.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.2.0.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
-3. Start a new Load/Sewing session after an extension restart.
-4. Tune Gravity and Seam Pull with repeated real-character trials.
-5. Record the garment, initial placement, parameter pair, click count, and
-   outcome for each meaningful trial.
-6. Do not remove the temporary controls until values work on more than one
-   garment/placement.
-7. After adopting final constants, remove or hide the temporary tuning box,
-   update this record, bump the build version, rebuild, and rerun packaged
-   integration tests.
+3. Start from Load/Sewing after an extension or Blender restart; abandoned
+   partial Kitsuke continuation is outside the supported workflow.
+4. Continue real-character trials with the fixed Gravity 1.0 m/s² and Seam Pull
+   30 mm/click values; record click count and manual interventions.
+5. Prioritize Body tunneling/contact refresh before adding textile controls.
+6. Run both `tests/blender_mesh_check.py` and
+   `tests/blender_undo_check.py` against the installed ZIP before release.
+7. Read `SESSION_MEMORY.md` for the current handoff and explicitly deferred
+   parser/topology issues.

@@ -1,6 +1,6 @@
 # Yohsai PDF/SVG-to-JSON Specification
 
-Status: initial implementation specification
+Status: implemented schema and Blender workflow contract
 Version: 1.0.0
 
 ## 1. Purpose
@@ -44,11 +44,15 @@ loads the JSON only after exit code `0`, and reports parser errors to the user.
 
 PDF is the preferred Adobe Illustrator interchange format. Version 1 accepts
 exactly one page and reads its standard page-content operators; Illustrator
-private editing data is not required. Closed paths containing a valid `#` text
-label are pattern panels. Other closed or open artwork without a panel label is
-ignored, allowing reference silhouettes to remain on the page.
+private editing data is not required. Explicitly closed paths containing a valid
+`#` text label are emitted as pattern panels. Unlabeled artwork is not emitted,
+but all explicitly closed paths currently participate in label containment.
+Therefore an unlabeled closed outline must not enclose a labeled panel. Open
+reference silhouettes do not participate and are safe to keep on the page.
 
-PDF line and cubic Bezier path operators are retained. Text annotations use the
+PDF line and cubic Bezier path operators are retained. The current parser
+requires an explicit `h` close-path operation; close-and-paint and implicit fill
+closure are not yet promoted to closed panels. Text annotations use the
 same `#`, `@W`, `@S<number>cm`, and single-letter sewing syntax as SVG. The
 initial Illustrator compatibility profile also decodes its embedded
 Identity-H ASCII font convention when a ToUnicode map is absent.
@@ -121,7 +125,10 @@ All JSON coordinates and lengths use meters. The conversion factor is:
 
 `meters_per_svg_unit = annotation_centimeters / 100 / scale_path_svg_length`
 
-PDF scale is defined directly by points as described in section 3.1.
+PDF scale is defined directly by points as described in section 3.1. The
+intended contract requires positive `@S` metadata. Version 0.2.0 still has a
+known validation gap for zero or negative PDF annotations; such input is
+unsupported even if the parser accepts it.
 
 ## 5. Coordinates
 
@@ -130,7 +137,8 @@ PDF scale is defined directly by points as described in section 3.1.
   SVG transforms.
 - All output coordinates are meters.
 - No panel is translated or packed by the parser.
-- Relative placement between panels in the SVG is preserved.
+- Relative placement between panels in the source document is preserved in
+  JSON. Initial Blender Load deliberately repacks the panels.
 
 ## 6. Annotation association
 
@@ -162,6 +170,10 @@ part of the stored value. ASCII letters compare case-insensitively and normalize
 to uppercase. ASCII letters, digits, underscore, and hyphen are accepted. Empty,
 invalid, or duplicate normalized labels are errors.
 
+ASCII-only labels are the contract. Version 0.2.0 has a known Python
+case-insensitive-regex gap that may accept a small set of Unicode case-folding
+characters. Those accidental spellings are unsupported and must not be used.
+
 ## 7. Panel and segment identity
 
 An explicit `#` label is the panel ID. Without a label, if an SVG path has an
@@ -182,8 +194,9 @@ The output is UTF-8 JSON with this top-level structure:
   "schema": "yohsai-pattern",
   "version": "1.0.0",
   "source": {
-    "svg_path": "C:/patterns/example.svg",
-    "clothes_layer": "CLOTHES"
+    "svg_path": "C:/patterns/example.pdf",
+    "clothes_layer": "PDF # labeled panels",
+    "input_format": "pdf"
   },
   "units": "m",
   "scale": {
@@ -196,6 +209,10 @@ The output is UTF-8 JSON with this top-level structure:
   "sewing_groups": {}
 }
 ```
+
+`source.svg_path` is a legacy field name retained for compatibility and stores
+the absolute source path for both PDF and SVG. PDF documents additionally set
+`source.input_format` to `pdf`; its absence currently means the SVG profile.
 
 Each panel has an ID, optional normalized `label`, source path ID, `closed:
 true`, and an ordered `segments` array. A labeled panel begins:
@@ -253,16 +270,21 @@ Numbers must be finite JSON numbers. The output contains no NaN or Infinity.
 
 ## 9. Blender user interface
 
-The Yohsai N-panel exposes:
+The Yohsai N-panel groups all inputs first:
 
 - `Pattern Path`: a file selector for a PDF or SVG document;
+- `Clothes`: the loaded numbered collection used by later actions;
+- `Body`: select the fixed collision mesh used by Kitsuke.
+
+It then exposes only the four primary actions in workflow order:
+
 - `Load`: parse the pattern and create separate cloth-part objects;
 - `Update`: recut the selected Clothes collection from the same saved file;
-- `Clothes`: the loaded numbered collection used by later actions;
 - `Sewing`: build the combined sewn preview after manual part placement;
-- `Body`: select the fixed collision mesh used by Kitsuke;
 - `Kitsuke`: advance a short Taichi simulation and restore separate parts;
-- a short status message.
+
+A short status message appears below the actions. Solver tuning and silhouette
+export are intentionally absent from this production panel.
 
 `Load` validates the path, starts the external parser, and returns control to
 Blender immediately. Repeated activation while a parse is running is rejected.
@@ -285,9 +307,9 @@ The welded fold remains an internal constrained edge with a `fold` attribute.
 
 Bezier and line boundaries are sampled at no more than approximately `0.01 m`
 between boundary vertices. The interior is filled with a near-uniform constrained
-triangular mesh at the same nominal spacing. Triangles form valid faces suitable
-for a later Cloth modifier. `Load` does not create loose sewing-spring edges,
-perform sewing, or add a Cloth modifier.
+triangular mesh at the same nominal spacing. Triangles form the panel topology
+consumed by Yohsai's Taichi solver. `Load` does not create loose sewing-preview
+edges, perform Sewing, or add a Blender Cloth modifier.
 
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
 named `sewing_<LABEL>`. Fold edges use the Boolean mesh attribute `fold`.
@@ -310,14 +332,14 @@ Expanded panels are packed horizontally without overlap:
 - the combined bounds are centered at world `X = 0`;
 - face normals point toward world `-Y`.
 
-The original SVG panel-to-panel offsets are not used for this initial packing.
+The original PDF/SVG panel-to-panel offsets are not used for this initial packing.
 
-### 10.5 Update boundary
+### 10.5 Load versus Update
 
-`Load` always creates a new unused numbered collection. Updating an already
-dressed garment is a separate future workflow because it must define panel
-identity, topology changes, deformation transfer, sewing preservation, modifier
-preservation, and panel-count changes.
+`Load` always creates a new unused numbered collection. `Update` is the
+implemented recut workflow for an existing collection and is specified in
+section 13. The current Update scope requires the same panel-object count and
+normalized `#` label set, while triangulation and vertex counts may change.
 
 ## 11. Sewing
 
@@ -339,14 +361,14 @@ user must move the intended seams closer together.
 
 Vertices are matched monotonically by normalized distance along each ordered
 path. This preserves ordering even when the two paths contain different vertex
-counts. The resulting connections are edges that belong to no face, as required
-for Blender Cloth sewing springs. They receive Boolean edge attributes named
+counts. The resulting connectivity record uses edges that belong to no face.
+They receive Boolean edge attributes named
 `sewing_spring_<LABEL>`. The original marked boundaries retain
 `sewing_<LABEL>`.
 
-Blender Cloth sewing springs operate within one Mesh object. `Sewing` therefore
-creates `<collection>_SEWN`, containing all positioned parts as disconnected
-face islands plus the loose sewing edges. The original separate part objects are
+`Sewing` creates `<collection>_SEWN`, containing all positioned parts as
+disconnected face islands plus the loose sewing edges so Yohsai can verify and
+capture cross-panel pairs. The original separate part objects are
 kept in the same collection but hidden in the viewport and render. No Cloth
 modifier is added in this step. Repeating `Sewing` for a collection that already
 contains a sewn mesh is an error.
@@ -356,29 +378,40 @@ contains a sewn mesh is an error.
 The combined `Sewing` object is a visual verification and connectivity record,
 not the persistent editing representation. On the first `Kitsuke`, Yohsai reads
 its loose sewing edges, snapshots the evaluated Body, and creates a transient
-Taichi simulation containing all source panels. The pattern edge lengths remain
-the stretch rest lengths, paired seam vertices target zero distance, and body
-and self contact use a 0.002 m thickness.
+Taichi simulation containing all source panels. Later clicks reuse that live
+runtime. The pattern edge lengths remain the stretch rest lengths, paired seam
+vertices progressively approach zero distance, and body and self contact use a
+0.002 m thickness.
 
-One click advances sixteen fixed 1/240-second steps and closes each transient seam
-target by 0.030 m under a default 1.0 m/s² downward acceleration. This count is deliberately not exposed in the user interface.
+One click advances sixteen fixed 1/240-second steps and closes each transient
+seam target by 0.030 m under a default 1.0 m/s² downward acceleration. This
+count is deliberately not exposed in the user interface.
 After the calculation, positions are mapped
 back by source object and vertex index, the combined preview is removed, and
 the separate source objects are shown. The user may translate and rotate any
 selection of those objects in Object Mode before clicking again. A transformed
 part starts the next click with zero velocity; unchanged parts retain velocity.
 
-Topology edits and object scaling are rejected during a session. Topology is
-changed in the pattern and loaded as a new clothes collection. The Body is
-constant after its first evaluated snapshot. Runtime velocity is not persisted
-across reopening a Blender file.
+Object scaling and vertex-count changes are rejected during a session. Direct
+vertex edits and same-vertex-count topology edits are unsupported but are not
+yet completely detected; topology must be changed in the pattern. The Body is
+constant within one live runtime.
 
-Version 0.1.12 uses the tested gravity and seam-closure defaults internally.
+Version 0.2.0 mirrors exact seam pairs and targets, per-vertex velocity,
+revision, runtime epoch, and accepted Object Mode matrices into undoable Blender
+data after every successful click. Blender `undo_post` and `redo_post` handlers discard the
+non-undoable Taichi objects. The next Kitsuke reconstructs them from the state
+restored by Blender, preventing a 30 mm seam stage from being skipped. Recovery
+data is valid only for the current add-on runtime. Continuing an abandoned
+partially dressed session after reopening Blender or reloading the add-on is
+unsupported.
+
+Version 0.2.0 uses the tested gravity and seam-closure defaults internally.
 They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.1.12 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.2.0 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update
@@ -412,6 +445,7 @@ verification; Kitsuke refuses with `Sewing required` until Sewing succeeds.
 ## 14. Future compatibility
 
 Future versions may add darts, notches, grain lines, seam order and direction,
-additional SVG primitives, error-checker interoperability, and Blender geometry
-generation. Such additions require a schema-version change or backward-
-compatible optional fields. They must not silently reinterpret version 1 data.
+additional PDF/SVG primitives, error-checker interoperability, and richer
+Blender geometry generation. Such additions require a schema-version change or
+backward-compatible optional fields. They must not silently reinterpret version
+1 data.

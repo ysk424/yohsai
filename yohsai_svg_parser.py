@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Standalone Illustrator SVG to Yohsai JSON converter.
+"""Standalone Illustrator PDF/SVG to Yohsai JSON converter.
 
-This module deliberately depends only on the Python standard library. Blender
-starts it in a separate process; it never imports bpy or shares Blender state.
+SVG parsing uses the Python standard library; PDF parsing uses bundled pypdf.
+Blender starts this module in a separate process, so it never imports bpy or
+shares Blender state.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ SCHEMA_VERSION = "1.0.0"
 
 
 class ParseError(ValueError):
-    """An SVG does not satisfy the Yohsai input profile."""
+    """A PDF or SVG does not satisfy the Yohsai input profile."""
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ class Point:
     y: float
 
     def as_json(self, scale: float) -> list[float]:
-        # SVG points down; Yohsai's two-dimensional coordinate system points up.
+        # Internal source points use a downward Y convention; Yohsai JSON uses up.
         return [_clean_float(self.x * scale), _clean_float(-self.y * scale)]
 
 

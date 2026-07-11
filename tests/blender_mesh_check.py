@@ -1,4 +1,4 @@
-"""Blender-background integration check for Yohsai mesh loading."""
+"""Blender-background integration check for Load, Sewing, Update, and Kitsuke."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ try:
     assert bounds[1][0] - bounds[0][1] >= 0.099
 
     # Sewing uses the parts' current world transforms, keeps them as hidden
-    # sources, and creates loose spring edges in one combined simulation mesh.
+# sources, and creates loose spring edges in one combined verification mesh.
     parts[0].location.y += 0.03
     sewing_result = bpy.ops.yohsai.sewing()
     assert sewing_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
@@ -145,8 +145,8 @@ try:
     assert any((Vector(a) - Vector(b)).length > 1.0e-7 for a, b in zip(before, after))
     assert all(all(value == value and abs(value) < 1.0e6 for value in point) for point in after)
 
-    # Object-mode placement between clicks is accepted and the simulation can
-    # rebuild its transient sewing constraints without a persistent sewn mesh.
+# Object-mode placement between clicks is accepted while the live simulation
+# retains exact sewing pairs without a persistent combined preview mesh.
     parts[0].location.x += 0.01
     parts[0].rotation_euler.z += 0.02
     second_kitsuke = bpy.ops.yohsai.kitsuke()

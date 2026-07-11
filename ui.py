@@ -11,6 +11,7 @@ import tomllib
 from pathlib import Path
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
@@ -22,6 +23,7 @@ from .kitsuke import (
     clear_kitsuke_session,
     clear_sessions,
     has_kitsuke_session,
+    reset_runtime_epoch,
 )
 from .mesh_loader import create_clothes_mesh, create_sewn_mesh, update_clothes_mesh
 
@@ -34,6 +36,34 @@ _parse_collection_name: str | None = None
 _loaded_pattern_json: dict | None = None
 _PARSER_FILENAME = "yohsai_svg_parser.py"
 _JSON_FILENAME = "yohsai_pattern.json"
+
+
+@persistent
+def _history_change_post(_unused) -> None:
+    """Discard non-undoable Taichi objects after Blender restores its data."""
+    clear_sessions()
+
+
+@persistent
+def _file_load_pre(_unused) -> None:
+    """Give every loaded file a new recovery epoch and no stale Taichi objects."""
+    reset_runtime_epoch()
+
+
+def _register_history_handlers() -> None:
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _history_change_post not in handlers:
+            handlers.append(_history_change_post)
+    if _file_load_pre not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_file_load_pre)
+
+
+def _unregister_history_handlers() -> None:
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _history_change_post in handlers:
+            handlers.remove(_history_change_post)
+    if _file_load_pre in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_file_load_pre)
 
 
 def _version() -> str:
@@ -383,10 +413,12 @@ def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.yohsai = PointerProperty(type=YohsaiProperties)
+    _register_history_handlers()
 
 
 def unregister():
-    clear_sessions()
+    _unregister_history_handlers()
+    reset_runtime_epoch()
     if bpy.app.timers.is_registered(_poll_svg_parser):
         bpy.app.timers.unregister(_poll_svg_parser)
     del bpy.types.Scene.yohsai

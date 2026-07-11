@@ -147,6 +147,12 @@ After every simulation step, the panels return to separate Blender objects so
 the operator can translate and rotate them before the next transient sewing and
 simulation step.
 
+Undo/Redo recovery does not make simulation state authoritative pattern data.
+Yohsai may mirror seam targets and velocity into Blender data so Blender can
+restore one interactive Kitsuke history step correctly, but that data is scoped
+to the current runtime and may be discarded on restart, Update, or recutting.
+The PDF/SVG pattern remains the only durable construction authority.
+
 ## 8. Illustrator interaction should stay minimal
 
 Marvelous Designer and conventional 3D applications frequently require the

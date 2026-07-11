@@ -533,7 +533,7 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
     old_source = str(collection.get("yohsai_source_svg", ""))
     new_source = str(source.get("svg_path", ""))
     if not old_source or not new_source or bpy.path.abspath(old_source) != bpy.path.abspath(new_source):
-        raise UpdateError("Update must use the same SVG file as the selected Clothes collection.")
+        raise UpdateError("Update must use the same PDF or SVG file as the selected Clothes collection.")
 
     parts = sorted(
         (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),

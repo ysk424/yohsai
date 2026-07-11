@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.1.12"
+version = "0.2.0"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -42,6 +42,7 @@ paths = [
     "DESIGN_PHILOSOPHY.md",
     "README.md",
     "DEVELOPMENT_NOTES.md",
+    "SESSION_MEMORY.md",
     "UTIL/silhouette_export.py",
     "UTIL/README.md",
     "LICENSE",

@@ -2,6 +2,7 @@
 """Incremental, transient cloth simulation for the Yohsai Kitsuke workflow."""
 
 from dataclasses import dataclass
+from uuid import uuid4
 
 import bpy
 import numpy as np
@@ -22,6 +23,14 @@ MAX_SPEED_M_PER_SECOND = 1.0
 MAX_CONSTRAINT_CORRECTION_M = 0.002
 MAX_DISPLACEMENT_PER_CLICK_M = 0.1
 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
+
+_STATE_EPOCH_KEY = "yohsai_kitsuke_epoch"
+_STATE_REVISION_KEY = "yohsai_kitsuke_revision"
+_STATE_SEAMS_KEY = "yohsai_kitsuke_seams"
+_STATE_SEAM_REST_KEY = "yohsai_kitsuke_seam_rest"
+_STATE_MATRIX_KEY = "yohsai_kitsuke_matrix"
+_VELOCITY_ATTRIBUTE = "yohsai_kitsuke_velocity"
+_RUNTIME_EPOCH = uuid4().hex
 
 
 class KitsukeError(RuntimeError):
@@ -61,6 +70,92 @@ def _parts(collection: bpy.types.Collection) -> list[bpy.types.Object]:
         ),
         key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
     )
+
+
+def _persisted_state_is_current(collection: bpy.types.Collection | None) -> bool:
+    if collection is None:
+        return False
+    return (
+        str(collection.get(_STATE_EPOCH_KEY, "")) == _RUNTIME_EPOCH
+        and int(collection.get(_STATE_REVISION_KEY, 0)) > 0
+    )
+
+
+def _read_persisted_state(
+    collection: bpy.types.Collection,
+    parts: list[_PartRange],
+    seam_count: int,
+) -> tuple[int, np.ndarray, np.ndarray] | None:
+    if not _persisted_state_is_current(collection):
+        return None
+    try:
+        revision = int(collection[_STATE_REVISION_KEY])
+        seam_rest = np.asarray(collection[_STATE_SEAM_REST_KEY], dtype=np.float32)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise KitsukeError("The stored Kitsuke Undo state is incomplete. Reload the pattern before continuing.") from exc
+    if seam_rest.shape != (seam_count,) or not np.all(np.isfinite(seam_rest)):
+        raise KitsukeError("The stored Kitsuke seam state no longer matches the current sewing constraints.")
+
+    velocity_blocks: list[np.ndarray] = []
+    for part in parts:
+        attribute = part.obj.data.attributes.get(_VELOCITY_ATTRIBUTE)
+        if (
+            attribute is None
+            or attribute.domain != "POINT"
+            or attribute.data_type != "FLOAT_VECTOR"
+            or len(attribute.data) != part.count
+        ):
+            raise KitsukeError(f"{part.obj.name} has no valid Kitsuke velocity state for Undo recovery.")
+        block = np.empty((part.count, 3), dtype=np.float32)
+        attribute.data.foreach_get("vector", block.ravel())
+        if not np.all(np.isfinite(block)):
+            raise KitsukeError(f"{part.obj.name} has a non-finite Kitsuke velocity state.")
+        try:
+            stored_matrix = tuple(float(value) for value in part.obj[_STATE_MATRIX_KEY])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise KitsukeError(f"{part.obj.name} has no valid Object Mode transform for Undo recovery.") from exc
+        if len(stored_matrix) != 16:
+            raise KitsukeError(f"{part.obj.name} has an invalid Object Mode transform for Undo recovery.")
+        if not np.allclose(stored_matrix, _matrix_tuple(part.obj.matrix_world), rtol=0.0, atol=1.0e-7):
+            block.fill(0.0)
+        velocity_blocks.append(block)
+    return revision, seam_rest, np.concatenate(velocity_blocks).astype(np.float32)
+
+
+def _read_persisted_seams(collection: bpy.types.Collection, vertex_count: int) -> np.ndarray:
+    try:
+        values = np.asarray(collection[_STATE_SEAMS_KEY], dtype=np.int32)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise KitsukeError("The stored Kitsuke sewing pairs are incomplete. Run Sewing again.") from exc
+    if not len(values) or len(values) % 2:
+        raise KitsukeError("The stored Kitsuke sewing pairs are invalid. Run Sewing again.")
+    seams = values.reshape((-1, 2))
+    if np.any(seams < 0) or np.any(seams >= vertex_count) or np.any(seams[:, 0] == seams[:, 1]):
+        raise KitsukeError("The stored Kitsuke sewing pairs no longer match the panel vertices.")
+    return seams
+
+
+def _write_velocity_state(part: _PartRange, velocities: np.ndarray) -> None:
+    mesh = part.obj.data
+    attribute = mesh.attributes.get(_VELOCITY_ATTRIBUTE)
+    if attribute is not None and (attribute.domain != "POINT" or attribute.data_type != "FLOAT_VECTOR"):
+        mesh.attributes.remove(attribute)
+        attribute = None
+    if attribute is None:
+        attribute = mesh.attributes.new(name=_VELOCITY_ATTRIBUTE, type="FLOAT_VECTOR", domain="POINT")
+    attribute.data.foreach_set("vector", np.asarray(velocities, dtype=np.float32).ravel())
+
+
+def _clear_persisted_state(collection: bpy.types.Collection) -> None:
+    for key in (_STATE_EPOCH_KEY, _STATE_REVISION_KEY, _STATE_SEAMS_KEY, _STATE_SEAM_REST_KEY):
+        if key in collection:
+            del collection[key]
+    for obj in _parts(collection):
+        if _STATE_MATRIX_KEY in obj:
+            del obj[_STATE_MATRIX_KEY]
+        attribute = obj.data.attributes.get(_VELOCITY_ATTRIBUTE)
+        if attribute is not None:
+            obj.data.attributes.remove(attribute)
 
 
 def _sewn_preview(collection: bpy.types.Collection) -> bpy.types.Object | None:
@@ -573,15 +668,21 @@ class _KitsukeSession:
         self.parts = ranges
         self.positions = np.concatenate(position_blocks).astype(np.float32)
         rest_positions = np.concatenate(rest_blocks).astype(np.float32)
-        self.velocities = np.zeros_like(self.positions)
         self.faces = np.asarray(faces, dtype=np.int32).reshape((-1, 3))
         self.edges, self.edge_rest = _edge_constraints(ranges, rest_positions)
         self.bends, self.bend_rest = _bending_constraints(ranges, rest_positions)
-        self.seams = (
-            _seam_constraints(preview, ranges)
-            if preview is not None
-            else _seam_constraints_from_parts(collection, ranges)
-        )
+        if preview is not None:
+            self.seams = _seam_constraints(preview, ranges)
+        elif _persisted_state_is_current(collection):
+            self.seams = _read_persisted_seams(collection, len(self.positions))
+        else:
+            self.seams = _seam_constraints_from_parts(collection, ranges)
+        persisted = None if preview is not None else _read_persisted_state(collection, ranges, len(self.seams))
+        if persisted is None:
+            self.revision = 0
+            self.velocities = np.zeros_like(self.positions)
+        else:
+            self.revision, persisted_seams, self.velocities = persisted
         self.body = _body_snapshot(context, body)
         self.body_pointer = body.as_pointer()
         self.matrices = {part.obj.name: _matrix_tuple(part.obj.matrix_world) for part in ranges}
@@ -598,6 +699,8 @@ class _KitsukeSession:
             self.faces,
             self.body,
         )
+        if persisted is not None:
+            self.runtime.replace_seam_state(persisted_seams)
         exclusions = _self_exclusions(len(self.positions), self.faces, self.edges, self.seams)
         self.self_exclusions = exclusions
 
@@ -648,6 +751,17 @@ class _KitsukeSession:
         context.view_layer.objects.active = self.parts[0].obj
         context.view_layer.update()
 
+    def _persist_undo_state(self):
+        for part in self.parts:
+            selection = self.velocities[part.start : part.start + part.count]
+            _write_velocity_state(part, selection)
+            part.obj[_STATE_MATRIX_KEY] = list(_matrix_tuple(part.obj.matrix_world))
+        self.revision += 1
+        self.collection[_STATE_SEAMS_KEY] = [int(value) for value in self.seams.ravel()]
+        self.collection[_STATE_SEAM_REST_KEY] = [float(value) for value in self.runtime.seam_state()]
+        self.collection[_STATE_REVISION_KEY] = self.revision
+        self.collection[_STATE_EPOCH_KEY] = _RUNTIME_EPOCH
+
     def advance(self, context, gravity_magnitude: float, seam_closure: float):
         self._read_user_transforms()
         if _project_body_penetrations(self.body, self.positions, self.velocities):
@@ -681,6 +795,7 @@ class _KitsukeSession:
             )
         self.positions, self.velocities = positions, velocities
         self._scatter(context)
+        self._persist_undo_state()
 
 
 def advance_kitsuke(
@@ -719,10 +834,20 @@ def clear_sessions() -> None:
     _sessions.clear()
 
 
+def reset_runtime_epoch() -> None:
+    """Invalidate all live and saved recovery state before Blender loads a file."""
+    global _RUNTIME_EPOCH
+    clear_sessions()
+    _RUNTIME_EPOCH = uuid4().hex
+
+
 def clear_kitsuke_session(collection: bpy.types.Collection | None) -> None:
     if collection is not None:
         _sessions.pop(collection.as_pointer(), None)
+        _clear_persisted_state(collection)
 
 
 def has_kitsuke_session(collection: bpy.types.Collection | None) -> bool:
-    return collection is not None and collection.as_pointer() in _sessions
+    return collection is not None and (
+        collection.as_pointer() in _sessions or _persisted_state_is_current(collection)
+    )
