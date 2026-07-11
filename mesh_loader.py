@@ -13,7 +13,7 @@ from mathutils import Vector
 from mathutils.geometry import delaunay_2d_cdt
 
 
-MESH_SPACING_M = 0.02
+MESH_SPACING_M = 0.01
 PANEL_GAP_M = 0.10
 WORLD_Y_M = -1.0
 BOTTOM_Z_M = 0.01

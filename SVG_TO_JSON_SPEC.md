@@ -13,7 +13,8 @@ share memory with Blender.
 
 The standalone conversion ends when valid JSON has been produced. Blender then
 creates an initial flat garment mesh from that JSON. Darts, notches, grain lines,
-advanced sewing rules, dressing, and simulation setup are outside this version.
+and advanced sewing rules are outside this schema version. Sections 11 and 12
+define Blender operations that consume the preserved sewing metadata.
 
 ## 2. Process contract
 
@@ -209,7 +210,9 @@ The Yohsai N-panel exposes:
 - `SVG Path`: a file selector for an SVG document;
 - `Load`: parse the SVG and create separate cloth-part objects;
 - `Clothes`: the loaded numbered collection used by later actions;
-- `Sewing`: build the combined sewn mesh after manual part placement;
+- `Sewing`: build the combined sewn preview after manual part placement;
+- `Body`: select the fixed collision mesh used by Kitsuke;
+- `Kitsuke`: advance a short Taichi simulation and restore separate parts;
 - a short status message.
 
 `Load` validates the path, starts the external parser, and returns control to
@@ -231,7 +234,7 @@ The welded fold remains an internal constrained edge with a `fold` attribute.
 
 ### 10.2 Triangulation
 
-Bezier and line boundaries are sampled at no more than approximately `0.02 m`
+Bezier and line boundaries are sampled at no more than approximately `0.01 m`
 between boundary vertices. The interior is filled with a near-uniform constrained
 triangular mesh at the same nominal spacing. Triangles form valid faces suitable
 for a later Cloth modifier. `Load` does not create loose sewing-spring edges,
@@ -299,7 +302,36 @@ kept in the same collection but hidden in the viewport and render. No Cloth
 modifier is added in this step. Repeating `Sewing` for a collection that already
 contains a sewn mesh is an error.
 
-## 12. Future compatibility
+## 12. Kitsuke
+
+The combined `Sewing` object is a visual verification and connectivity record,
+not the persistent editing representation. On the first `Kitsuke`, Yohsai reads
+its loose sewing edges, snapshots the evaluated Body, and creates a transient
+Taichi simulation containing all source panels. The pattern edge lengths remain
+the stretch rest lengths, paired seam vertices target zero distance, and body
+and self contact use a 0.002 m thickness.
+
+One click advances sixteen fixed 1/240-second steps and closes each transient seam
+target by 0.030 m under a default 1.0 m/s² downward acceleration. This count is deliberately not exposed in the user interface.
+After the calculation, positions are mapped
+back by source object and vertex index, the combined preview is removed, and
+the separate source objects are shown. The user may translate and rotate any
+selection of those objects in Object Mode before clicking again. A transformed
+part starts the next click with zero velocity; unchanged parts retain velocity.
+
+Topology edits and object scaling are rejected during a session. Topology is
+changed in the pattern and loaded as a new clothes collection. The Body is
+constant after its first evaluated snapshot. Runtime velocity is not persisted
+across reopening a Blender file.
+
+Version 0.1.9 temporarily exposes gravity and seam closure in the N-panel; their
+current values are read on every click without reconstructing the session.
+
+Taichi selects an available GPU architecture automatically and uses an explicit
+CPU fallback when GPU initialization fails. The 0.1.9 package supplies Windows
+x64 CPython 3.13 wheels.
+
+## 13. Future compatibility
 
 Future versions may add darts, notches, grain lines, seam order and direction,
 additional SVG primitives, error-checker interoperability, and Blender geometry

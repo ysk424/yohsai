@@ -3,24 +3,34 @@
 from __future__ import annotations
 
 import copy
+import os
 import sys
 from pathlib import Path
 
 
-repo_parent = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_parent))
-
 import bpy  # noqa: E402
-import yohsai  # noqa: E402
-import yohsai.ui as ui  # noqa: E402
-from yohsai.mesh_loader import MeshLoadError  # noqa: E402
+from mathutils import Vector  # noqa: E402
+
+installed_check = os.environ.get("YOHSAI_INSTALLED_CHECK") == "1"
+if installed_check:
+    from bl_ext.user_default import yohsai  # noqa: E402
+    from bl_ext.user_default.yohsai import kitsuke as kitsuke_module, ui  # noqa: E402
+    from bl_ext.user_default.yohsai.mesh_loader import MeshLoadError  # noqa: E402
+else:
+    repo_parent = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repo_parent))
+    import yohsai  # noqa: E402
+    import yohsai.kitsuke as kitsuke_module  # noqa: E402
+    import yohsai.ui as ui  # noqa: E402
+    from yohsai.mesh_loader import MeshLoadError  # noqa: E402
 
 
 svg_path = Path.home() / "Desktop" / "test2.svg"
 if not svg_path.is_file():
     raise RuntimeError(f"Missing integration input: {svg_path}")
 
-yohsai.register()
+if not installed_check:
+    yohsai.register()
 try:
     bpy.context.scene.yohsai.svg_path = str(svg_path)
     result = bpy.ops.yohsai.load_svg()
@@ -85,9 +95,17 @@ try:
         if item.value
     }
     assert spring_edge_indices
+    spring_pairs = [tuple(sewn_mesh.edges[index].vertices) for index in spring_edge_indices]
+    initial_sewn_positions = [vertex.co.copy() for vertex in sewn_mesh.vertices]
+    initial_seam_distance = sum(
+        (initial_sewn_positions[a] - initial_sewn_positions[b]).length
+        for a, b in spring_pairs
+    ) / len(spring_pairs)
     assert all(sewn_mesh.edges[index].is_loose for index in spring_edge_indices)
     assert abs(min(vertex.co.y for vertex in sewn_mesh.vertices) + 1.0) < 1.0e-6
     assert abs(max(vertex.co.y for vertex in sewn_mesh.vertices) + 0.97) < 1.0e-6
+    sewn_vertex_count = len(sewn_mesh.vertices)
+    sewn_face_count = len(sewn_mesh.polygons)
 
     try:
         duplicate_sewing = bpy.ops.yohsai.sewing()
@@ -96,6 +114,64 @@ try:
     else:
         assert duplicate_sewing == {"CANCELLED"}
     assert "already has a sewn mesh" in bpy.context.scene.yohsai.parse_status
+
+    # Kitsuke uses the verified sewn preview only as transient connectivity,
+    # advances a fixed interval, then restores the separate editable parts.
+    bpy.ops.mesh.primitive_cube_add(location=(0.0, -1.0, 0.1), scale=(0.1, 0.1, 0.1))
+    body = bpy.context.object
+    body.name = "KITSUKE_TEST_BODY"
+    bpy.context.scene.yohsai.body_object = body
+    body_snapshot = kitsuke_module._body_snapshot(bpy.context, body)
+    assert kitsuke_module._inside_body(body_snapshot, (0.0, -1.0, 0.1))
+    assert not kitsuke_module._inside_body(body_snapshot, (10.0, 10.0, 10.0))
+    before = [
+        tuple(obj.matrix_world @ vertex.co)
+        for obj in parts
+        for vertex in obj.data.vertices
+    ]
+    kitsuke_result = bpy.ops.yohsai.kitsuke()
+    assert kitsuke_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    assert not any(obj.get("yohsai_role") == "sewn" for obj in collection.objects)
+    assert all(not obj.hide_get() and not obj.hide_render for obj in parts)
+    after = [
+        tuple(obj.matrix_world @ vertex.co)
+        for obj in parts
+        for vertex in obj.data.vertices
+    ]
+    assert any((Vector(a) - Vector(b)).length > 1.0e-7 for a, b in zip(before, after))
+    assert all(all(value == value and abs(value) < 1.0e6 for value in point) for point in after)
+
+    # Object-mode placement between clicks is accepted and the simulation can
+    # rebuild its transient sewing constraints without a persistent sewn mesh.
+    parts[0].location.x += 0.01
+    parts[0].rotation_euler.z += 0.02
+    second_kitsuke = bpy.ops.yohsai.kitsuke()
+    assert second_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    bpy.context.scene.yohsai.kitsuke_gravity = 0.5
+    bpy.context.scene.yohsai.kitsuke_seam_pull_mm = 5.0
+    tuned_kitsuke = bpy.ops.yohsai.kitsuke()
+    assert tuned_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    assert "gravity 0.5" in bpy.context.scene.yohsai.parse_status
+    assert "seam 5 mm" in bpy.context.scene.yohsai.parse_status
+    bpy.context.scene.yohsai.kitsuke_gravity = kitsuke_module.DEFAULT_GRAVITY_M_PER_SECOND_SQUARED
+    bpy.context.scene.yohsai.kitsuke_seam_pull_mm = kitsuke_module.DEFAULT_SEAM_CLOSURE_PER_CLICK_M * 1000.0
+    for _step in range(8):
+        repeated_kitsuke = bpy.ops.yohsai.kitsuke()
+        assert repeated_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    repeated_positions = [
+        tuple(obj.matrix_world @ vertex.co)
+        for obj in parts
+        for vertex in obj.data.vertices
+    ]
+    assert all(
+        all(value == value and abs(value) < 1.0e6 for value in point)
+        for point in repeated_positions
+    )
+    repeated_seam_distance = sum(
+        (Vector(repeated_positions[a]) - Vector(repeated_positions[b])).length
+        for a, b in spring_pairs
+    ) / len(spring_pairs)
+    assert repeated_seam_distance < initial_seam_distance
 
     invalid = copy.deepcopy(ui._loaded_pattern_json)
     invalid["panels"][0]["segments"][1]["fold"] = True
@@ -113,9 +189,10 @@ try:
     print(
         "YOHSAI_SEWING_OK",
         f"parts={len(parts)}",
-        f"verts={len(sewn_mesh.vertices)}",
-        f"faces={len(sewn_mesh.polygons)}",
+        f"verts={sewn_vertex_count}",
+        f"faces={sewn_face_count}",
         f"springs={len(spring_edge_indices)}",
     )
 finally:
-    yohsai.unregister()
+    if not installed_check:
+        yohsai.unregister()

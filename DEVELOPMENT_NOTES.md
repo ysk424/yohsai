@@ -2,7 +2,14 @@
 
 Status: public development preview.
 
-Current version: 0.1.3.
+Current version: 0.1.9.
+
+The authoritative Kitsuke design, tuning log, known limitations, and resume
+checklist are maintained in `KITSUKE_DESIGN.md`.
+
+The first real-character 0.1.9 trial produces a recognizable fitted dress from
+the incremental workflow. Remaining visible holes at the shoulder, chest, and
+abdomen make Body contact refinement the next primary engineering task.
 
 ## Version and Build Policy
 
@@ -45,11 +52,23 @@ adding sewing or fitting behavior.
   positioned world-space endpoints, and creates a combined mesh with loose
   sewing-spring edges. The separate source parts remain hidden in the same
   collection for future update work.
+- `Kitsuke` treats the separate panel objects as the editable source of truth.
+  Each click reconstructs transient Taichi stretch, bend, sewing, body-contact,
+  and self-contact constraints, advances a fixed short interval, and scatters
+  the result back to the original objects. Object-mode translation and rotation
+  are accepted between clicks and clear velocity only on the moved parts.
+  Sewing targets close by 30 mm per click, gravity defaults to 1.0 m/s², and
+  each click uses sixteen 1/240-second substeps. Bend stiffness is reduced from
+  0.18 to 0.08, and maximum velocity is 1.0 m/s. Body contact uses one nearest triangle
+  per cloth vertex, collision corrections are averaged, and unstable steps are
+  rolled back before Blender mesh data is changed.
+  Gravity and seam closure are temporarily exposed in the N-panel for repeated
+  empirical tuning and are read again on every click.
 - SVG parsing currently covers the exact `CLOTHES` layer, closed line/cubic
   paths, meter scaling through `@S<number>cm`, single-letter sewing groups, and
   `@W` fold edges. The contract is documented in `SVG_TO_JSON_SPEC.md`.
 - The panel owns a mesh body pointer, with Blender's object selector/eyedropper.
 - `Silhouette` exports XZ and YZ orthographic silhouette shadows as SVG files
   readable by Adobe Illustrator.
-- No Cloth modifier setup, simulation, dressing, or update/shape-transfer
-  behavior is implemented yet.
+- No Blender Cloth modifier is used. Kitsuke sessions are intentionally
+  in-memory; reopening a partially dressed file restarts with zero velocity.

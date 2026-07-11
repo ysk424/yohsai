@@ -13,10 +13,18 @@ from html import escape
 from pathlib import Path
 
 import bpy
-from bpy.props import PointerProperty, StringProperty
+from bpy.props import FloatProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 from mathutils import Vector
 
+from .kitsuke import (
+    DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
+    DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
+    KitsukeError,
+    advance_kitsuke,
+    clear_sessions,
+    has_kitsuke_session,
+)
 from .mesh_loader import create_clothes_mesh, create_sewn_mesh
 
 
@@ -41,6 +49,11 @@ def _default_output_dir() -> str:
     if bpy.data.filepath:
         return os.path.dirname(bpy.data.filepath)
     return os.path.expanduser("~")
+
+
+def _mesh_object_poll(_properties, obj: Object) -> bool:
+    """Only allow actual mesh objects in the shared Body field."""
+    return obj.type == "MESH"
 
 
 def _parser_data_dir() -> str:
@@ -224,8 +237,28 @@ class YohsaiProperties(PropertyGroup):
     )
     body_object: PointerProperty(
         name="Body",
-        description="Body mesh used for silhouette projection",
+        description="Fixed body mesh used for Kitsuke collision and silhouette projection",
         type=Object,
+        poll=_mesh_object_poll,
+    )
+    kitsuke_gravity: FloatProperty(
+        name="Gravity",
+        description="Downward acceleration used by each Kitsuke step",
+        default=DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
+        min=0.0,
+        soft_max=9.81,
+        max=100.0,
+        precision=3,
+        unit="ACCELERATION",
+    )
+    kitsuke_seam_pull_mm: FloatProperty(
+        name="Seam Pull",
+        description="Distance removed from every transient seam target per Kitsuke click",
+        default=DEFAULT_SEAM_CLOSURE_PER_CLICK_M * 1000.0,
+        min=0.0,
+        soft_max=30.0,
+        max=1000.0,
+        precision=2,
     )
     output_dir: StringProperty(
         name="Output",
@@ -328,6 +361,11 @@ class YOHSAI_OT_sewing(Operator):
     def execute(self, context):
         props = context.scene.yohsai
         collection = props.clothes_collection
+        if has_kitsuke_session(collection):
+            message = "Kitsuke has already started. Reload the pattern before creating a new Sewing preview."
+            props.parse_status = f"Sewing failed: {message}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
         try:
             sewn_object = create_sewn_mesh(context, collection)
         except Exception as exc:
@@ -337,6 +375,41 @@ class YOHSAI_OT_sewing(Operator):
             return {"CANCELLED"}
         props.parse_status = f"Sewn {sewn_object.name}"
         self.report({"INFO"}, f"Created {sewn_object.name}")
+        return {"FINISHED"}
+
+
+class YOHSAI_OT_kitsuke(Operator):
+    bl_idname = "yohsai.kitsuke"
+    bl_label = "Kitsuke"
+    bl_description = "Advance a short cloth simulation, then restore the separate parts for manual placement"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def execute(self, context):
+        props = context.scene.yohsai
+        try:
+            message = advance_kitsuke(
+                context,
+                props.clothes_collection,
+                props.body_object,
+                props.kitsuke_gravity,
+                props.kitsuke_seam_pull_mm / 1000.0,
+            )
+        except KitsukeError as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Kitsuke failed: {message[:240]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Kitsuke failed: {message[:240]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        props.parse_status = message
+        self.report({"INFO"}, message)
         return {"FINISHED"}
 
 
@@ -356,10 +429,15 @@ class YOHSAI_PT_main(Panel):
         layout.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
         layout.prop(props, "clothes_collection")
         layout.operator(YOHSAI_OT_sewing.bl_idname, text="Sewing")
+        layout.prop(props, "body_object")
+        tuning = layout.box()
+        tuning.label(text="Kitsuke Tuning (Temporary)")
+        tuning.prop(props, "kitsuke_gravity")
+        tuning.prop(props, "kitsuke_seam_pull_mm", text="Seam Pull (mm/click)")
+        layout.operator(YOHSAI_OT_kitsuke.bl_idname, text="Kitsuke")
         layout.label(text=props.parse_status)
         layout.separator(factor=0.8)
         layout.label(text="Silhouette Export")
-        layout.prop(props, "body_object")
         layout.prop(props, "output_dir")
         layout.operator(YOHSAI_OT_export_silhouette.bl_idname, text="Silhouette")
 
@@ -369,6 +447,7 @@ _classes = (
     YOHSAI_OT_export_silhouette,
     YOHSAI_OT_load_svg,
     YOHSAI_OT_sewing,
+    YOHSAI_OT_kitsuke,
     YOHSAI_PT_main,
 )
 
@@ -380,6 +459,7 @@ def register():
 
 
 def unregister():
+    clear_sessions()
     if bpy.app.timers.is_registered(_poll_svg_parser):
         bpy.app.timers.unregister(_poll_svg_parser)
     del bpy.types.Scene.yohsai

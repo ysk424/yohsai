@@ -1,17 +1,28 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.1.3"
+version = "0.1.9"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
 type = "add-on"
 
 blender_version_min = "5.1.0"
+platforms = ["windows-x64"]
 
 license = ["SPDX:GPL-3.0-or-later"]
 
 tags = ["Modeling", "Pipeline"]
+
+wheels = [
+    "./wheels/taichi-1.7.4-cp313-cp313-win_amd64.whl",
+    "./wheels/colorama-0.4.6-py2.py3-none-any.whl",
+    "./wheels/dill-0.4.1-py3-none-any.whl",
+    "./wheels/rich-15.0.0-py3-none-any.whl",
+    "./wheels/markdown_it_py-4.2.0-py3-none-any.whl",
+    "./wheels/pygments-2.20.0-py3-none-any.whl",
+    "./wheels/mdurl-0.1.2-py3-none-any.whl",
+]
 
 [permissions]
 files = "Load pattern SVG and write Yohsai JSON and silhouette SVG"
@@ -20,10 +31,12 @@ files = "Load pattern SVG and write Yohsai JSON and silhouette SVG"
 paths = [
     "__init__.py",
     "ui.py",
+    "kitsuke.py",
     "mesh_loader.py",
     "yohsai_svg_parser.py",
     "yohsai_defaults.json",
     "SVG_TO_JSON_SPEC.md",
+    "KITSUKE_DESIGN.md",
     "README.md",
     "DEVELOPMENT_NOTES.md",
     "LICENSE",
