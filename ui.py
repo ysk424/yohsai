@@ -12,7 +12,7 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .kitsuke import (
@@ -20,6 +20,9 @@ from .kitsuke import (
     DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
     KitsukeError,
     LOCKED_OBJECT_KEY,
+    MAX_SOLVER_ITERATIONS,
+    MIN_SOLVER_ITERATIONS,
+    SOLVER_ITERATIONS,
     advance_kitsuke,
     clear_kitsuke_session,
     clear_sessions,
@@ -272,6 +275,15 @@ class YohsaiProperties(PropertyGroup):
         get=_get_lock_selection,
         set=_set_lock_selection,
     )
+    kitsuke_iterations: IntProperty(
+        name="Iterations",
+        description="Kitsuke constraint iterations per substep. Lower this on slow PCs; raise it to reduce cloth stretch.",
+        default=SOLVER_ITERATIONS,
+        min=MIN_SOLVER_ITERATIONS,
+        max=MAX_SOLVER_ITERATIONS,
+        soft_min=4,
+        soft_max=64,
+    )
 
 
 class YOHSAI_OT_lock_auto(Operator):
@@ -443,6 +455,7 @@ class YOHSAI_OT_kitsuke(Operator):
                 props.body_object,
                 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
                 DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
+                props.kitsuke_iterations,
             )
         except KitsukeError as exc:
             message = str(exc).strip() or type(exc).__name__
@@ -479,6 +492,7 @@ class YOHSAI_PT_main(Panel):
         lock_row = inputs.row(align=True)
         lock_row.prop(props, "lock_selection")
         lock_row.operator(YOHSAI_OT_lock_auto.bl_idname, text="Auto")
+        inputs.prop(props, "kitsuke_iterations")
         layout.separator(factor=0.4)
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")

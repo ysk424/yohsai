@@ -349,7 +349,7 @@ They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.2.6 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.2.9 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update

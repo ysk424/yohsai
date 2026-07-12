@@ -13,15 +13,17 @@ from .mesh_loader import SewingError, build_sewing_plan
 
 
 TIME_STEP = 1.0 / 240.0
-STEPS_PER_CLICK = 16
-SOLVER_ITERATIONS = 1
+STEPS_PER_CLICK = 8
+SOLVER_ITERATIONS = 16
+MIN_SOLVER_ITERATIONS = 1
+MAX_SOLVER_ITERATIONS = 128
 SEAM_PROJECTION_PASSES = 4
-CONTACT_THICKNESS_M = 0.002
+CONTACT_THICKNESS_M = 0.005
 COLLISION_SEARCH_M = 0.04
 DEFAULT_SEAM_CLOSURE_PER_CLICK_M = 0.030
 VELOCITY_DAMPING_PER_SECOND = 4.0
 MAX_SPEED_M_PER_SECOND = 1.0
-MAX_CONSTRAINT_CORRECTION_M = 0.010
+MAX_CONSTRAINT_CORRECTION_M = 0.005
 MAX_DISPLACEMENT_PER_CLICK_M = 0.1
 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
 
@@ -706,13 +708,13 @@ def _create_runtime_type(ti):
                 else:
                     self.velocity[index] = ti.Vector.zero(ti.f32, 3)
 
-        def advance(self, body_candidates, self_candidates, gravity_magnitude, seam_closure):
+        def advance(self, body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations):
             self.tighten_seams(seam_closure)
             self.ratchet_seams()
             for _step in range(STEPS_PER_CLICK):
                 self.integrate(TIME_STEP, gravity_magnitude)
                 self.ratchet_seams()
-                for _iteration in range(SOLVER_ITERATIONS):
+                for _iteration in range(solver_iterations):
                     self.clear_corrections()
                     self.distance_corrections()
                     self.apply_corrections()
@@ -867,7 +869,7 @@ class _KitsukeSession:
         self.collection[_STATE_REVISION_KEY] = self.revision
         self.collection[_STATE_EPOCH_KEY] = _RUNTIME_EPOCH
 
-    def advance(self, context, gravity_magnitude: float, seam_closure: float):
+    def advance(self, context, gravity_magnitude: float, seam_closure: float, solver_iterations: int):
         self._read_user_transforms()
         if _project_body_penetrations(self.body, self.positions, self.velocities, self.locked):
             self.runtime.replace_state(self.positions, self.velocities, self.locked)
@@ -881,7 +883,7 @@ class _KitsukeSession:
             self.faces,
             self.self_exclusions,
         )
-        self.runtime.advance(body_candidates, self_candidates, gravity_magnitude, seam_closure)
+        self.runtime.advance(body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations)
         positions, velocities = self.runtime.state()
         displacement = np.linalg.norm(positions - previous_positions, axis=1)
         maximum_displacement = float(displacement.max()) if len(displacement) else 0.0
@@ -909,8 +911,10 @@ def advance_kitsuke(
     body: bpy.types.Object,
     gravity_magnitude: float,
     seam_closure: float,
+    solver_iterations: int = SOLVER_ITERATIONS,
 ) -> str:
     """Advance one fixed Kitsuke interval and restore the separate cloth objects."""
+    solver_iterations = max(MIN_SOLVER_ITERATIONS, min(MAX_SOLVER_ITERATIONS, int(solver_iterations)))
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise KitsukeError("No loaded Yohsai clothes collection is selected.")
     key = collection.as_pointer()
@@ -926,11 +930,11 @@ def advance_kitsuke(
         _sessions[key] = session
     elif body is None or body.as_pointer() != session.body_pointer:
         raise KitsukeError("The Body used by this Kitsuke session cannot be changed after its first step.")
-    session.advance(context, gravity_magnitude, seam_closure)
+    session.advance(context, gravity_magnitude, seam_closure, solver_iterations)
     ti, _runtime = _ensure_taichi()
     arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     return (
-        f"Kitsuke: {STEPS_PER_CLICK} steps on {arch}; "
+        f"Kitsuke: {STEPS_PER_CLICK} steps x {solver_iterations} iterations on {arch}; "
         f"gravity {gravity_magnitude:.3g} m/s², seam {seam_closure * 1000.0:.3g} mm"
     )
 

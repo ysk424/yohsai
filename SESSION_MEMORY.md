@@ -2,7 +2,7 @@
 
 Status: authoritative handoff for the next Codex session  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Release prepared today: Yohsai 0.2.6
+Release prepared today: Yohsai 0.2.9
 
 ## Product viewpoint that must not drift
 
@@ -40,11 +40,16 @@ production UI controls.
 7. After editing and saving the same pattern, use Update; use Sewing again only
    when the authored sewing signature changed.
 
-Current tested solver values are 16 substeps at 1/240 s, Gravity 1.0 m/s²,
-Seam Pull 30 mm/click, ratcheting seam maximum-distance constraints, four
-post-contact seam projection passes, bend stiffness 0.08, stretch stiffness
-0.95, maximum speed 1.0 m/s, maximum constraint correction 10 mm/substep, and
-2 mm contact thickness.
+Current solver values are 8 substeps at 1/240 s, user-adjustable 1-128
+constraint iterations/substep with default 16, Gravity 1.0 m/s², Seam Pull
+30 mm/click, ratcheting seam
+maximum-distance constraints, four post-contact seam projection passes, bend
+stiffness 0.08, stretch stiffness 0.95, maximum speed 1.0 m/s, maximum
+constraint correction 5 mm/iteration, and 5 mm contact thickness.
+2026-07-12 user testing confirmed that higher Iterations reduce visible stretch
+and make the cloth behave stiffer. Keep the Iterations UI because the developer
+machine is much faster than a typical user PC; slower users need a direct way to
+lower quality instead of inheriting a fixed high-cost solver setting.
 
 Important design rule: visible seam opening is the unacceptable failure mode.
 When a garment is too small or Body collision conflicts with sewing, Yohsai
@@ -140,4 +145,4 @@ continuous-collision strategy is the next substantial solver task.
 5. Run both Blender integration scripts against the installed extension.
 6. Confirm `git status --short` is empty, then commit and push `main`.
 
-The expected archive for this handoff is `dist/yohsai-0.2.6.zip`.
+The expected archive for this handoff is `dist/yohsai-0.2.9.zip`.

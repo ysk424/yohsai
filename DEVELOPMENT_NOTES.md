@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.2.6.
+Current version: 0.2.9.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.

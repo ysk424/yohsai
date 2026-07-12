@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.2.6, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.2.9, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -90,8 +90,8 @@ data before another click.
 
 ## 5. Collision rules
 
-- Body contact thickness: 0.002 m.
-- Cloth self-contact thickness: 0.002 m.
+- Body contact thickness: 0.005 m.
+- Cloth self-contact thickness: 0.005 m.
 - Final paired seam distance: 0 m.
 - Seam closure has priority over Body and self-contact. If an undersized
   garment cannot satisfy both collision and sewing, the accepted failure is
@@ -117,20 +117,29 @@ Implementation: `kitsuke.py`, Taichi PBD-style Jacobi constraints.
 | Parameter | Current value | Notes |
 | --- | ---: | --- |
 | Time step | 1/240 s | Small-step stability |
-| Substeps per click | 16 | About 1/15 s simulated per click |
-| Constraint iterations per substep | 1 | Small Steps strategy |
+| Substeps per click | 8 | About 1/30 s simulated per click; chosen to raise iteration count without multiplying total work by 4x |
+| Constraint iterations per substep | UI: 1-128, default 16 | Lower on slow PCs; raise when stretch remains visible |
 | Post-contact seam projection passes | 4 | Keeps closed seams from reopening after collision |
 | Default gravity magnitude | 1.0 m/s² | Interactive tuning value |
 | Default seam closure | 30 mm/click | Seam maximum distance ratchets downward |
 | Velocity damping rate | 4.0/s | Quasi-static dressing bias |
-| Maximum velocity | 1.0 m/s | Sixteen substeps remain below the per-click displacement guard |
-| Maximum constraint correction | 10 mm/substep | Allows stronger seam closure |
+| Maximum velocity | 1.0 m/s | Eight substeps remain below the per-click displacement guard |
+| Maximum constraint correction | 5 mm/iteration | Limits single-step overshoot while repeated iterations recover total correction |
 | Maximum accepted click displacement | 0.1 m | Larger movement rolls back |
 | Collision broad-phase margin | 0.04 m | Reused during one click |
 
 The solver rolls back without writing Blender mesh data if positions or
 velocities become non-finite, or if any vertex moves more than 0.1 m in one
 click. The error reports the measured maximum displacement.
+
+The Kitsuke `Iterations` UI control intentionally exposes only the per-substep
+constraint iteration count. Substeps remain fixed at 8 so slower users have one
+simple performance knob without changing the collision time interval.
+Empirical note from 2026-07-12 testing: increasing iterations visibly reduces
+stretch and behaves like a higher apparent cloth stiffness in this PBD-style
+solver. This is expected and useful, but it is also hardware-sensitive, so the
+control is exposed as a user performance/quality knob rather than hard-coded to
+the fastest developer PC.
 
 Seam projection intentionally runs after Body and self-contact. This is a
 product rule, not a generic cloth-simulation default: Yohsai must preserve the
@@ -311,7 +320,7 @@ Manual testing confirmed this sequence works in 0.2.6.
   detected even though they are unsupported.
 - Live Taichi objects are not serialized. Blender stores only same-runtime
   Undo/Redo recovery data; cross-restart continuation is unsupported.
-- The bundled 0.2.6 distribution is Windows x64 / CPython 3.13.
+- The bundled 0.2.9 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -322,7 +331,7 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.2.6.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.2.9.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
 3. Start from Load/Sewing after an extension or Blender restart; abandoned

@@ -1,4 +1,4 @@
-# Yohsai 0.2.6
+# Yohsai 0.2.9
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -98,8 +98,10 @@ Scaling and vertex-count changes during Kitsuke are rejected. Other direct mesh
 edits are unsupported but are not yet completely detected; edit topology only
 in the pattern. Moving or rotating a part clears that part's velocity; untouched
 parts retain theirs. The Body is evaluated once for a live session and remains
-a fixed collider. Body/cloth and cloth/cloth contact thickness is 2 mm, while
+a fixed collider. Body/cloth and cloth/cloth contact thickness is 5 mm, while
 paired seam points progressively approach 0 mm.
+The Kitsuke `Iterations` box controls constraint iterations per substep; lower
+it on slow PCs and raise it on strong GPUs/CPUs when stretch is still visible.
 
 Kitsuke supports Blender Undo and Redo. Each successful click stores its exact
 seam vertex pairs and targets, per-vertex velocities, revision, and Object Mode
@@ -110,7 +112,7 @@ recovery state. Continuing an abandoned, partially dressed session across a
 restart is not supported; begin again from Load/Sewing when required.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.2.6 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.2.9 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.
