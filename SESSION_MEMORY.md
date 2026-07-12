@@ -2,7 +2,7 @@
 
 Status: authoritative handoff for the next Codex session  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Release prepared today: Yohsai 0.2.3
+Release prepared today: Yohsai 0.2.6
 
 ## Product viewpoint that must not drift
 
@@ -16,7 +16,14 @@ The production N-panel intentionally contains three inputs followed by four
 actions:
 
 1. Pattern Path, Clothes, Body;
-2. Load, Update, Sewing, Kitsuke.
+2. Lock/Auto;
+3. Load, Update, Sewing, Kitsuke.
+
+Lock is a literal object-level deformation exclusion for selected mesh objects.
+It preserves sewing information and does not infer garment meaning or dressing
+order. It is exclusive, not additive: checking Lock switches the locked set to
+the current selection, and unchecking clears the selected Clothes lock state.
+Auto is intentionally not implemented yet.
 
 Silhouette export is a once-per-character Scripting utility in `UTIL/`, not a
 normal Yohsai button. Gravity and seam closure are fixed internal values, not
@@ -49,6 +56,21 @@ topologically connect sewn seams.
 satisfactory shoulder result and resolved the visible seam-opening failure. Keep
 this rule explicit; generic cloth-simulation instincts may otherwise move
 collision resolution back after sewing and reintroduce the problem.
+
+0.2.4 adds manual Lock. A locked mesh object stays in the sewing graph but its
+vertices are not deformation targets during Kitsuke. This is a major staging
+primitive for not-yet-worn parts and dressing-order control. Keep it free of
+garment-semantic assumptions.
+
+0.2.5 fixes manual Lock switching. Rechecking Lock with a different selection
+must replace the old locked set; otherwise staged dressing cannot move from one
+reserved part to another.
+
+0.2.6 fixes manual Lock clearing. Unlock must clear the whole selected Clothes
+scope resolved from selected objects' `yohsai_collection`, not just the current
+selection or a possibly stale N-panel Clothes pointer. The expected workflow is
+front locked/back deforming, then back locked/front deforming, then no lock so
+both deform. Manual testing confirmed this sequence works in 0.2.6.
 
 ## 0.2.0 Undo/Redo design
 
@@ -87,7 +109,7 @@ Taichi 1.7.4, pypdf 6.14.2, and their listed wheels for Blender 5.2 / CPython
 
 ## Explicitly deferred issues
 
-These were reviewed on 2026-07-11 and intentionally not fixed in 0.2.3:
+These were reviewed on 2026-07-11 and intentionally not fixed in 0.2.6:
 
 - direct vertex edits and same-vertex-count topology changes are unsupported but
   not fully detected by Kitsuke;
@@ -118,4 +140,4 @@ continuous-collision strategy is the next substantial solver task.
 5. Run both Blender integration scripts against the installed extension.
 6. Confirm `git status --short` is empty, then commit and push `main`.
 
-The expected archive for this handoff is `dist/yohsai-0.2.3.zip`.
+The expected archive for this handoff is `dist/yohsai-0.2.6.zip`.

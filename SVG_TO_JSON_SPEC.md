@@ -112,7 +112,7 @@ part of the stored value. ASCII letters compare case-insensitively and normalize
 to uppercase. ASCII letters, digits, underscore, and hyphen are accepted. Empty,
 invalid, or duplicate normalized labels are errors.
 
-ASCII-only labels are the contract. Version 0.2.3 has a known Python
+ASCII-only labels are the contract. Version 0.2.6 has a known Python
 case-insensitive-regex gap that may accept a small set of Unicode case-folding
 characters. Those accidental spellings are unsupported and must not be used.
 
@@ -349,7 +349,7 @@ They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.2.3 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.2.6 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update

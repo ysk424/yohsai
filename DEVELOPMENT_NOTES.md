@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.2.3.
+Current version: 0.2.6.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
@@ -44,7 +44,11 @@ treating Blender mesh identity as authoritative.
 
 - The add-on registers a `Yohsai` N-panel in the 3D View sidebar.
 - The N-panel groups Pattern Path, Clothes, and Body at the top, followed only
-  by the four primary actions: Load, Update, Sewing, and Kitsuke.
+  by Lock/Auto and the four primary actions: Load, Update, Sewing, and Kitsuke.
+  Lock marks selected mesh objects as excluded from Kitsuke deformation. It is
+  an exclusive staging set: checking Lock switches the locked set to the current
+  selection, and unchecking clears the selected Clothes lock state. Auto is
+  present as a reserved button and has no automatic behavior yet.
 - `Pattern Path` and `Load` accept PDF, run the parser in a separate process,
   and asynchronously load its fixed, atomically written JSON result. PDF uses
   bundled `pypdf` and `typing_extensions` wheels. SVG input is no longer
@@ -82,6 +86,9 @@ treating Blender mesh identity as authoritative.
   10 mm/substep, and maximum velocity is 1.0 m/s. Body contact uses one nearest
   triangle per cloth vertex, collision corrections are averaged, and unstable
   steps are rolled back before Blender mesh data is changed.
+  Locked mesh objects remain in the sewing graph but their vertices are fixed
+  during Kitsuke; this supports staged dressing and future part-addition
+  workflows without inferring garment semantics.
   Gravity and seam closure use the tested fixed defaults and are intentionally
   absent from the production N-panel.
 - Each successful Kitsuke click mirrors the non-undoable runtime's exact seam

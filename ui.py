@@ -12,13 +12,14 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import PointerProperty, StringProperty
+from bpy.props import BoolProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .kitsuke import (
     DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
     DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
     KitsukeError,
+    LOCKED_OBJECT_KEY,
     advance_kitsuke,
     clear_kitsuke_session,
     clear_sessions,
@@ -78,6 +79,72 @@ def _version() -> str:
 def _mesh_object_poll(_properties, obj: Object) -> bool:
     """Only allow actual mesh objects in the shared Body field."""
     return obj.type == "MESH"
+
+
+def _selected_mesh_objects() -> list[Object]:
+    return [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+
+
+def _clothes_part_objects(collection: Collection | None) -> list[Object]:
+    if collection is None:
+        return []
+    return [
+        obj
+        for obj in collection.objects
+        if obj.type == "MESH" and obj.get("yohsai_role") == "part"
+    ]
+
+
+def _lock_scope_collections(properties, objects: list[Object]) -> list[Collection]:
+    collections: list[Collection] = []
+    seen: set[str] = set()
+
+    def add(collection: Collection | None) -> None:
+        if collection is not None and collection.get("yohsai_role") == "clothes" and collection.name not in seen:
+            collections.append(collection)
+            seen.add(collection.name)
+
+    add(properties.clothes_collection)
+    for obj in objects:
+        collection_name = str(obj.get("yohsai_collection", ""))
+        add(bpy.data.collections.get(collection_name))
+    return collections
+
+
+def _lock_scope_parts(properties, objects: list[Object]) -> list[Object]:
+    scoped: list[Object] = []
+    seen: set[str] = set()
+    for collection in _lock_scope_collections(properties, objects):
+        for obj in _clothes_part_objects(collection):
+            if obj.name not in seen:
+                scoped.append(obj)
+                seen.add(obj.name)
+    return scoped
+
+
+def _get_lock_selection(properties) -> bool:
+    objects = _selected_mesh_objects()
+    return bool(objects) and any(bool(obj.get(LOCKED_OBJECT_KEY, False)) for obj in objects)
+
+
+def _set_lock_selection(properties, value: bool) -> None:
+    objects = _selected_mesh_objects()
+    parts = _lock_scope_parts(properties, objects)
+    if value:
+        if not objects:
+            properties.parse_status = "Select mesh object(s) before changing Lock."
+            return
+        for obj in parts:
+            obj[LOCKED_OBJECT_KEY] = False
+        for obj in objects:
+            obj[LOCKED_OBJECT_KEY] = True
+        properties.parse_status = f"Locked {len(objects)} selected mesh object(s) for Kitsuke deformation."
+        return
+
+    targets = parts if parts else objects
+    for obj in targets:
+        obj[LOCKED_OBJECT_KEY] = False
+    properties.parse_status = f"Unlocked {len(targets)} mesh object(s) for Kitsuke deformation."
 
 
 def _parser_data_dir() -> str:
@@ -199,6 +266,25 @@ class YohsaiProperties(PropertyGroup):
         type=Object,
         poll=_mesh_object_poll,
     )
+    lock_selection: BoolProperty(
+        name="Lock",
+        description="Exclude selected mesh object(s) from Kitsuke deformation while keeping sewing information",
+        get=_get_lock_selection,
+        set=_set_lock_selection,
+    )
+
+
+class YOHSAI_OT_lock_auto(Operator):
+    bl_idname = "yohsai.lock_auto"
+    bl_label = "Auto"
+    bl_description = "Automatic Lock selection is reserved for a later implementation"
+
+    @classmethod
+    def poll(cls, context):
+        return False
+
+    def execute(self, context):
+        return {"CANCELLED"}
 
 
 class YOHSAI_OT_load_svg(Operator):
@@ -390,6 +476,9 @@ class YOHSAI_PT_main(Panel):
         inputs.prop(props, "svg_path")
         inputs.prop(props, "clothes_collection")
         inputs.prop(props, "body_object")
+        lock_row = inputs.row(align=True)
+        lock_row.prop(props, "lock_selection")
+        lock_row.operator(YOHSAI_OT_lock_auto.bl_idname, text="Auto")
         layout.separator(factor=0.4)
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
@@ -401,6 +490,7 @@ class YOHSAI_PT_main(Panel):
 
 _classes = (
     YohsaiProperties,
+    YOHSAI_OT_lock_auto,
     YOHSAI_OT_load_svg,
     YOHSAI_OT_update_svg,
     YOHSAI_OT_sewing,

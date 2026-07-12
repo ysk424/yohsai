@@ -1,4 +1,4 @@
-# Yohsai 0.2.3
+# Yohsai 0.2.6
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -16,7 +16,10 @@ The top of the Yohsai N-panel contains all three inputs:
 - `Clothes`: the loaded Yohsai clothes collection;
 - `Body`: the fixed collision mesh used by Kitsuke.
 
-Below them are `Load`, `Update`, `Sewing`, and `Kitsuke`, in workflow order.
+Below Body, `Lock` marks the currently selected mesh object(s) as excluded from
+Kitsuke deformation. The adjacent `Auto` button is reserved for a later
+automatic selection workflow. Below them are `Load`, `Update`, `Sewing`, and
+`Kitsuke`, in workflow order.
 Gravity and seam pull use the tested Yohsai defaults and are no longer exposed
 as N-panel debugging controls.
 
@@ -84,6 +87,12 @@ restores every pattern panel as a separate object. Move and rotate any one or
 more panels in Object Mode, press `Kitsuke` again, and repeat while the seams
 close and the garment approaches the body.
 
+Selecting mesh object(s) and enabling `Lock` keeps those objects in the sewing
+graph but removes their vertices from Kitsuke deformation. Lock is exclusive:
+checking it replaces the previous locked set with the current selection, while
+unchecking it clears the selected Clothes lock state. Locked parts can therefore
+anchor or reserve sewn pieces while other parts continue dressing.
+
 The pattern topology and its original edge lengths remain authoritative.
 Scaling and vertex-count changes during Kitsuke are rejected. Other direct mesh
 edits are unsupported but are not yet completely detected; edit topology only
@@ -101,7 +110,7 @@ recovery state. Continuing an abandoned, partially dressed session across a
 restart is not supported; begin again from Load/Sewing when required.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.2.3 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.2.6 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.

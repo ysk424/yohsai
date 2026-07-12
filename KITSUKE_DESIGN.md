@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.2.3, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.2.6, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -74,6 +74,9 @@ data before another click.
   pattern.
 - An untouched panel retains its per-vertex velocity between clicks.
 - A translated or rotated panel has all its vertex velocities reset to zero.
+- A locked mesh object remains in sewing connectivity but is excluded from
+  Kitsuke deformation. Lock is object-level and literal: it does not infer
+  garment type, dressing order, or whether the object is currently worn.
 - The evaluated Body is captured when a live session is constructed and remains
   constant until that session is invalidated.
 - Every successful click stores exact seam pairs and targets, per-vertex
@@ -259,6 +262,40 @@ product priority that seams are more important than nearby cloth/body
 collision quality. Future solver changes must preserve this priority unless the
 construction model itself changes.
 
+### 0.2.4 object-level deformation Lock
+
+The N-panel adds `Lock` between Body and the action buttons. Checking it while
+mesh objects are selected writes an object-level flag that removes those
+objects' vertices from Kitsuke deformation while preserving sewing pairs,
+boundary labels, update identity, and recovery metadata. Lock is exclusive:
+checking it clears previous Locks in the selected Clothes collection and makes
+the current selection the locked set; unchecking it clears the selected Clothes
+lock state. The locked object still participates in the indexed sewing graph;
+unlocked sewn partners may be pulled toward it, but the locked vertices do not
+integrate gravity, collision, stretch, bend, or seam projection.
+
+This is intentionally not a garment-semantic feature. Yohsai does not decide
+that an object is a sleeve, bodice, already worn part, or future addition. The
+user controls staging by selecting mesh objects and toggling Lock. This creates
+the foundation for adding not-yet-worn parts and controlling dressing order
+without introducing hidden assumptions. The adjacent `Auto` button is only a UI
+placeholder in 0.2.4; automatic lock selection is deferred until manual Lock is
+validated.
+
+0.2.5 fixes the first Lock switching problem found in manual testing. The
+initial implementation behaved like additive flags, so an older locked object
+could remain locked when the user selected a different object and checked Lock
+again. That is not the intended staging model. Manual Lock is a current
+selection switch, not a cumulative selection history.
+
+0.2.6 fixes the corresponding unlock-scope problem. Lock clearing must not rely
+only on the N-panel Clothes pointer, because that pointer can be absent or stale
+relative to the selected part objects. The UI now resolves the selected objects'
+`yohsai_collection` back to their Clothes collection and clears every part in
+that scope. The required manual sequence is: lock front, simulate back; lock
+back, simulate front; uncheck Lock, then both front and back deform again.
+Manual testing confirmed this sequence works in 0.2.6.
+
 ## 9. Known limitations
 
 - This is stabilized PBD, not a complete XPBD material model.
@@ -274,7 +311,7 @@ construction model itself changes.
   detected even though they are unsupported.
 - Live Taichi objects are not serialized. Blender stores only same-runtime
   Undo/Redo recovery data; cross-restart continuation is unsupported.
-- The bundled 0.2.3 distribution is Windows x64 / CPython 3.13.
+- The bundled 0.2.6 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -285,7 +322,7 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.2.3.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.2.6.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
 3. Start from Load/Sewing after an extension or Blender restart; abandoned

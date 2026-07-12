@@ -31,6 +31,7 @@ _STATE_SEAMS_KEY = "yohsai_kitsuke_seams"
 _STATE_SEAM_REST_KEY = "yohsai_kitsuke_seam_rest"
 _STATE_MATRIX_KEY = "yohsai_kitsuke_matrix"
 _VELOCITY_ATTRIBUTE = "yohsai_kitsuke_velocity"
+LOCKED_OBJECT_KEY = "yohsai_kitsuke_locked"
 _RUNTIME_EPOCH = uuid4().hex
 
 
@@ -43,6 +44,7 @@ class _PartRange:
     obj: bpy.types.Object
     start: int
     count: int
+    locked: bool
 
 
 @dataclass(frozen=True)
@@ -311,9 +313,12 @@ def _project_body_penetrations(
     body: _BodySnapshot,
     positions: np.ndarray,
     velocities: np.ndarray,
+    locked: np.ndarray,
 ) -> bool:
     changed = False
     for index, point in enumerate(positions):
+        if locked[index]:
+            continue
         if not _inside_body(body, point):
             continue
         location, _normal, face_index, _distance = body.bvh.find_nearest(
@@ -383,6 +388,13 @@ def _body_collision_candidates(positions: np.ndarray, body: _BodySnapshot) -> np
     return np.asarray(pairs, dtype=np.int32)
 
 
+def _unlocked_body_collision_candidates(positions: np.ndarray, body: _BodySnapshot, locked: np.ndarray) -> np.ndarray:
+    pairs = _body_collision_candidates(positions, body)
+    if not len(pairs):
+        return pairs
+    return pairs[locked[pairs[:, 0]] == 0]
+
+
 def _self_exclusions(
     vertex_count: int,
     faces: np.ndarray,
@@ -435,11 +447,12 @@ def _ensure_taichi():
 def _create_runtime_type(ti):
     @ti.data_oriented
     class _TaichiRuntime:
-        def __init__(self, positions, velocities, edges, edge_rest, bends, bend_rest, seams, faces, body):
+        def __init__(self, positions, velocities, edges, edge_rest, bends, bend_rest, seams, faces, body, locked):
             self.vertex_count = len(positions)
             self.x = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.previous = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.velocity = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
+            self.locked = ti.field(dtype=ti.i32, shape=self.vertex_count)
             self.delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.count = ti.field(dtype=ti.i32, shape=self.vertex_count)
             self.seam_delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
@@ -456,6 +469,7 @@ def _create_runtime_type(ti):
             self.body_faces = ti.Vector.field(3, dtype=ti.i32, shape=len(body.faces))
             self.x.from_numpy(positions)
             self.velocity.from_numpy(velocities)
+            self.locked.from_numpy(locked)
             self.edges.from_numpy(edges)
             self.edge_rest.from_numpy(edge_rest)
             if len(bends):
@@ -469,18 +483,27 @@ def _create_runtime_type(ti):
             self.body_faces.from_numpy(body.faces)
 
         @ti.kernel
-        def replace_state(self, positions: ti.types.ndarray(dtype=ti.f32, ndim=2), velocities: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        def replace_state(
+            self,
+            positions: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            velocities: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            locked: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        ):
             for index in range(self.vertex_count):
                 self.x[index] = ti.Vector([positions[index, 0], positions[index, 1], positions[index, 2]])
                 self.velocity[index] = ti.Vector([velocities[index, 0], velocities[index, 1], velocities[index, 2]])
+                self.locked[index] = locked[index]
 
         @ti.kernel
         def integrate(self, dt: ti.f32, gravity_magnitude: ti.f32):
             gravity = ti.Vector([0.0, 0.0, -gravity_magnitude])
             for index in range(self.vertex_count):
                 self.previous[index] = self.x[index]
-                self.velocity[index] += gravity * dt
-                self.x[index] += self.velocity[index] * dt
+                if self.locked[index] == 0:
+                    self.velocity[index] += gravity * dt
+                    self.x[index] += self.velocity[index] * dt
+                else:
+                    self.velocity[index] = ti.Vector.zero(ti.f32, 3)
 
         @ti.kernel
         def clear_corrections(self):
@@ -527,12 +550,18 @@ def _create_runtime_type(ti):
             difference = self.x[b] - self.x[a]
             length = difference.norm()
             if length > max_length and length > 1.0e-8:
-                correction = difference * (((length - max_length) * 0.5) / length)
-                for axis in ti.static(range(3)):
-                    ti.atomic_add(self.seam_delta[a][axis], correction[axis])
-                    ti.atomic_add(self.seam_delta[b][axis], -correction[axis])
-                ti.atomic_add(self.seam_count[a], 1)
-                ti.atomic_add(self.seam_count[b], 1)
+                unlocked = (1 - self.locked[a]) + (1 - self.locked[b])
+                if unlocked > 0:
+                    share = 1.0 / ti.cast(unlocked, ti.f32)
+                    correction = difference * (((length - max_length) * share) / length)
+                    if self.locked[a] == 0:
+                        for axis in ti.static(range(3)):
+                            ti.atomic_add(self.seam_delta[a][axis], correction[axis])
+                        ti.atomic_add(self.seam_count[a], 1)
+                    if self.locked[b] == 0:
+                        for axis in ti.static(range(3)):
+                            ti.atomic_add(self.seam_delta[b][axis], -correction[axis])
+                        ti.atomic_add(self.seam_count[b], 1)
 
         @ti.kernel
         def distance_corrections(self):
@@ -572,13 +601,13 @@ def _create_runtime_type(ti):
         @ti.kernel
         def apply_corrections(self):
             for index in range(self.vertex_count):
-                if self.count[index] > 0:
+                if self.locked[index] == 0 and self.count[index] > 0:
                     self.x[index] += self.delta[index] / ti.cast(self.count[index], ti.f32)
 
         @ti.kernel
         def apply_seam_projection(self):
             for index in range(self.vertex_count):
-                if self.seam_count[index] > 0:
+                if self.locked[index] == 0 and self.seam_count[index] > 0:
                     self.x[index] += self.seam_delta[index] / ti.cast(self.seam_count[index], ti.f32)
 
         @ti.func
@@ -668,11 +697,14 @@ def _create_runtime_type(ti):
         @ti.kernel
         def update_velocities(self, dt: ti.f32):
             for index in range(self.vertex_count):
-                velocity = (self.x[index] - self.previous[index]) / dt
-                speed = velocity.norm()
-                if speed > MAX_SPEED_M_PER_SECOND:
-                    velocity *= MAX_SPEED_M_PER_SECOND / speed
-                self.velocity[index] = velocity * ti.exp(-VELOCITY_DAMPING_PER_SECOND * dt)
+                if self.locked[index] == 0:
+                    velocity = (self.x[index] - self.previous[index]) / dt
+                    speed = velocity.norm()
+                    if speed > MAX_SPEED_M_PER_SECOND:
+                        velocity *= MAX_SPEED_M_PER_SECOND / speed
+                    self.velocity[index] = velocity * ti.exp(-VELOCITY_DAMPING_PER_SECOND * dt)
+                else:
+                    self.velocity[index] = ti.Vector.zero(ti.f32, 3)
 
         def advance(self, body_candidates, self_candidates, gravity_magnitude, seam_closure):
             self.tighten_seams(seam_closure)
@@ -715,19 +747,23 @@ class _KitsukeSession:
         position_blocks: list[np.ndarray] = []
         rest_blocks: list[np.ndarray] = []
         faces: list[tuple[int, int, int]] = []
+        locked_blocks: list[np.ndarray] = []
         offset = 0
         for obj in objects:
             if any(abs(float(scale) - 1.0) > 1.0e-5 for scale in obj.scale):
                 raise KitsukeError(f"Apply Scale on {obj.name} before Kitsuke; moving and rotating are supported, scaling is not.")
             block = _world_vertices(obj)
-            ranges.append(_PartRange(obj, offset, len(block)))
+            locked = bool(obj.get(LOCKED_OBJECT_KEY, False))
+            ranges.append(_PartRange(obj, offset, len(block), locked))
             position_blocks.append(block)
             rest_blocks.append(_pattern_rest_vertices(obj))
+            locked_blocks.append(np.full(len(block), 1 if locked else 0, dtype=np.int32))
             faces.extend(_triangles(obj.data, offset))
             offset += len(block)
         self.collection = collection
         self.parts = ranges
         self.positions = np.concatenate(position_blocks).astype(np.float32)
+        self.locked = np.concatenate(locked_blocks).astype(np.int32)
         rest_positions = np.concatenate(rest_blocks).astype(np.float32)
         self.faces = np.asarray(faces, dtype=np.int32).reshape((-1, 3))
         self.edges, self.edge_rest = _edge_constraints(ranges, rest_positions)
@@ -759,6 +795,7 @@ class _KitsukeSession:
             self.seams,
             self.faces,
             self.body,
+            self.locked,
         )
         if persisted is not None:
             self.runtime.replace_seam_state(persisted_seams)
@@ -767,7 +804,7 @@ class _KitsukeSession:
 
     def _read_user_transforms(self):
         context_changed = False
-        for part in self.parts:
+        for part_index, part in enumerate(self.parts):
             obj = part.obj
             if len(obj.data.vertices) != part.count:
                 raise KitsukeError(
@@ -778,6 +815,13 @@ class _KitsukeSession:
             matrix = _matrix_tuple(obj.matrix_world)
             block = _world_vertices(obj)
             selection = slice(part.start, part.start + part.count)
+            locked = bool(obj.get(LOCKED_OBJECT_KEY, False))
+            locked_value = 1 if locked else 0
+            if part.locked != locked or np.any(self.locked[selection] != locked_value):
+                self.locked[selection] = locked_value
+                self.velocities[selection] = 0.0
+                self.parts[part_index] = _PartRange(obj, part.start, part.count, locked)
+                context_changed = True
             if matrix != self.matrices[obj.name] or not np.allclose(
                 block, self.positions[selection], rtol=0.0, atol=1.0e-6
             ):
@@ -787,7 +831,7 @@ class _KitsukeSession:
                 self.matrices[obj.name] = matrix
                 context_changed = True
         if context_changed:
-            self.runtime.replace_state(self.positions, self.velocities)
+            self.runtime.replace_state(self.positions, self.velocities, self.locked)
 
     def _scatter(self, context):
         for part in self.parts:
@@ -825,12 +869,12 @@ class _KitsukeSession:
 
     def advance(self, context, gravity_magnitude: float, seam_closure: float):
         self._read_user_transforms()
-        if _project_body_penetrations(self.body, self.positions, self.velocities):
-            self.runtime.replace_state(self.positions, self.velocities)
+        if _project_body_penetrations(self.body, self.positions, self.velocities, self.locked):
+            self.runtime.replace_state(self.positions, self.velocities, self.locked)
         previous_positions = self.positions.copy()
         previous_velocities = self.velocities.copy()
         previous_seams = self.runtime.seam_state()
-        body_candidates = _body_collision_candidates(self.positions, self.body)
+        body_candidates = _unlocked_body_collision_candidates(self.positions, self.body, self.locked)
         self_candidates = _collision_candidates(
             self.positions,
             self.positions,
@@ -848,7 +892,7 @@ class _KitsukeSession:
         ):
             self.positions = previous_positions
             self.velocities = previous_velocities
-            self.runtime.replace_state(self.positions, self.velocities)
+            self.runtime.replace_state(self.positions, self.velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)
             raise KitsukeError(
                 f"The simulation became unstable ({maximum_displacement:.3f} m maximum movement) "
