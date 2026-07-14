@@ -164,3 +164,66 @@ solver is still single-threaded.
 - Legacy Taichi remains available for recovery and comparison, but it does not
   implement the new native quad shear/area energies.
 - Parallel VBD coloring, SIMD, and GPU execution are future performance work.
+
+## 9. Triangular versus grainline cost record
+
+The following comparison uses the same `test2.pdf`, 5 mm nominal pitch,
+Blender 5.2 build, 16 iterations, and development machine. The native material
+microbenchmark passes empty contact candidate arrays, zero gravity, and zero
+seam closure so it measures the C++ material/seam loop rather than Python broad
+phase or Blender scattering. Four advances were run; the reported value is the
+median of the last three.
+
+| Metric | v0.4.1 triangular rods | v0.5.0 grain quads | Change |
+|---|---:|---:|---:|
+| Material pitch | 5 mm | 5 mm | same linear resolution |
+| Vertices | 19,454 | 16,948 | -12.9% |
+| Render/collision triangles | 38,030 | 33,018 | -13.2% |
+| Render/collision topology edges | 57,482 | 49,964 | -13.1% |
+| Structural Cosserat segments | 57,482 | 34,862 | -39.4% |
+| Cosserat continuation joints | 55,715 | 32,956 | -40.8% |
+| Explicit shear/area cells | 0 | 15,102 | added |
+| Native session construction | 0.471 s | 0.540 s | +14.7% |
+| Native material advance | 0.595 s | 0.558 s | -6.3% / 1.07x |
+| Broad source integration record | 388.210 s | 288.065 s | -25.8% / 1.35x |
+
+The full integration figures are useful regression observations but are not as
+controlled as the microbenchmark: they include pattern work, Python collision
+candidates, Blender updates, and different development commits.
+
+The small native advantage despite 39% fewer segments is expected. A triangular
+position sweep performs 114,964 segment-endpoint visits. The grainline sweep
+performs 69,724 segment-endpoint visits plus 60,408 quad-corner visits, or
+130,132 local visits; each quad visit also evaluates dot and cross products for
+both shear and area. The gain comes primarily from the 40% smaller orientation
+and continuation graph, while quad arithmetic spends much of that saving.
+
+At equal pitch the square lattice has fewer vertices because a staggered
+triangular lattice packs samples more densely. A square pitch of approximately
+4.67 mm would bring v0.5 to the v0.4.1 vertex count and provide about 7% finer
+linear sampling. A simple count-proportional extrapolation predicts about
+0.640 s per native advance at that density, roughly 7.6% slower than the
+5 mm triangular baseline. This is an estimate, not a measured result.
+
+The main grainline optimization opportunities are:
+
+1. store `(quad, corner)` directly instead of searching four corners on every
+   quad-vertex visit;
+2. replace vector-of-vectors adjacency with compact CSR/SoA storage;
+3. evaluate each cell's tangents, shear, area, and gradients once instead of
+   recomputing them independently at all four corners, then use a buffered
+   reduction or a validated colored sweep;
+4. parallelize quad work with four cell/vertex colors, or per-thread
+   accumulation and reduction (two-color checkerboarding is insufficient
+   because diagonal vertices share a quad);
+5. parallelize warp and weft orientation chains independently and apply SIMD;
+6. move or parallelize the Python collision broad phase, which is outside the
+   fast native microbenchmark and benefits directly from 13% fewer proxy
+   vertices/faces.
+
+The triangular solver also remains parallelizable and has the simpler local
+constraint, so the square representation is not automatically faster at equal
+vertex count. Its principal advantage is material correctness and a regular
+warp/weft structure; its current speed advantage at equal 5 mm pitch is real
+but modest. Keeping `yohsai-cosserat` as the unchanged triangular baseline
+provides the appropriate A/B reference while this decision is evaluated.
