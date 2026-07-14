@@ -123,7 +123,23 @@ a release-quality task, not a numerical correctness gate. GPU work begins only
 after the CPU implementation is used as a trusted oracle on additional garment
 fixtures.
 
-## 7. Licensing
+## 7. First owner acceptance
+
+On 2026-07-14, after testing the installed v0.4.0 build in the intended
+interactive dressing workflow, the project owner reported:
+
+- no visible Body penetration in the tested dressing sequence;
+- CPU performance was already practical and did not feel slow;
+- among the project's XPBD, finite-element, and Stable Cosserat prototypes,
+  this backend was the closest to the intended Kitsuke behavior.
+
+The owner also reported that implementation completed in materially less time
+and with fewer model tokens than initially expected. These are qualitative
+acceptance observations, not a timed benchmark, strain study, or guarantee of
+global non-penetration. The automated acceptance gates above remain the
+reproducible record.
+
+## 8. Licensing
 
 The complete Yohsai extension remains GPL-3.0-or-later. The Stable Cosserat
 algorithm is implemented from the published paper and checked against the

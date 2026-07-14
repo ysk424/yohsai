@@ -13,6 +13,16 @@ authoritative in `DESIGN_PHILOSOPHY.md`.
 The latest tested handoff, deferred issues, release procedure, and next priority
 are summarized in `SESSION_MEMORY.md`.
 
+## First v0.4 Owner Acceptance
+
+On 2026-07-14, the installed Stable Cosserat build was accepted in interactive
+testing: no visible Body penetration was observed, CPU response was considered
+practical, and its behavior was judged closer to the intended result than the
+project's XPBD and finite-element prototypes. This is qualitative owner
+feedback; it does not replace measured benchmarks or automated regression
+tests. The owner also reported lower-than-expected implementation time and
+model-token use.
+
 The first real-character 0.1.9 trial produces a recognizable fitted dress from
 the incremental workflow. Remaining visible holes at the shoulder, chest, and
 abdomen make Body contact refinement the next primary engineering task.
