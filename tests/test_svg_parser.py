@@ -34,26 +34,6 @@ class SvgParserTests(unittest.TestCase):
         with self.assertRaisesRegex(parser.ParseError, "no longer supported"):
             parser.parse_svg("input.svg")
 
-    def test_tube_requires_exactly_two_annotated_panels(self) -> None:
-        first = self._square_panel("FIRST", 0.0)
-        second = self._square_panel("SECOND", 2.0)
-        annotations = [
-            parser.Annotation("@TUBE", parser.Point(0.5, 0.5)),
-            parser.Annotation("@tube", parser.Point(2.5, 0.5)),
-        ]
-        parser._collect_pdf_annotations(annotations, [first, second], set())
-        self.assertTrue(first.tube)
-        self.assertTrue(second.tube)
-
-        first = self._square_panel("FIRST", 0.0)
-        second = self._square_panel("SECOND", 2.0)
-        with self.assertRaisesRegex(parser.ParseError, "exactly two annotated panels"):
-            parser._collect_pdf_annotations(
-                [parser.Annotation("@TUBE", parser.Point(0.5, 0.5))],
-                [first, second],
-                set(),
-            )
-
     @unittest.skipUnless(importlib.util.find_spec("pypdf"), "pypdf is not installed in this test interpreter")
     def test_supplied_illustrator_pdf(self) -> None:
         source = Path.home() / "Desktop" / "test2.pdf"
@@ -69,7 +49,6 @@ class SvgParserTests(unittest.TestCase):
         self.assertNotIn("reference_length_m", document["scale"])
         self.assertNotIn("reference_length_svg", document["scale"])
         self.assertAlmostEqual(document["scale"]["meters_per_svg_unit"], 0.0254 / 72.0)
-        self.assertEqual([panel["tube"] for panel in document["panels"]], [False, False])
         self.assertEqual(len(document["sewing_groups"]["A"]), 2)
         self.assertEqual(len(document["sewing_groups"]["B"]), 4)
         self.assertEqual(

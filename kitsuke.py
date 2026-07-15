@@ -10,13 +10,14 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 from .cosserat_native import (
-    INEXTENSIBLE_EXTENSION_COMPLIANCE,
     NativeCosseratError,
     NativeCosseratRuntime,
 )
 from .mesh_loader import (
     GRAINLINE_EDGE_FAMILY_ATTRIBUTE,
     GRAINLINE_EDGE_PROXY,
+    GRAINLINE_EDGE_WARP,
+    GRAINLINE_EDGE_WEFT,
     GRAINLINE_FACE_QUAD_ATTRIBUTE,
     SewingError,
     build_sewing_plan,
@@ -28,22 +29,19 @@ STEPS_PER_CLICK = 8
 SOLVER_ITERATIONS = 16
 MIN_SOLVER_ITERATIONS = 1
 MAX_SOLVER_ITERATIONS = 128
-SEAM_PROJECTION_PASSES = 4
 CONTACT_THICKNESS_M = 0.005
+CONTACT_CORRECTION_MAX_M = 0.0002
 COLLISION_SEARCH_M = 0.04
-DEFAULT_SEAM_CLOSURE_PER_CLICK_M = 0.030
-VELOCITY_DAMPING_PER_SECOND = 4.0
-MAX_SPEED_M_PER_SECOND = 1.0
-MAX_CONSTRAINT_CORRECTION_M = 0.005
-MAX_DISPLACEMENT_PER_CLICK_M = 0.1
 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
-# Experimental fabric value until the PDF-referenced material schema is
-# designed. Zero is the native solver's exact inextensible mode.
-KITSUKE_EXTENSION_COMPLIANCE = INEXTENSIBLE_EXTENSION_COMPLIANCE
+SEAM_ATTRACTION_FORCE = 300.0
+SEAM_CAPTURE_DISTANCE_M = 0.002
+STRETCH_RELAXATION = 1.0
+SHEAR_RELAXATION = 0.02
+BEND_RELAXATION = 0.0001
 KITSUKE_BACKEND_STABLE_COSSERAT = "STABLE_COSSERAT"
-KITSUKE_BACKEND_TAICHI_PBD = "TAICHI_PBD"
+KITSUKE_BACKEND_TAICHI = "TAICHI"
 DEFAULT_KITSUKE_BACKEND = KITSUKE_BACKEND_STABLE_COSSERAT
-KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT, KITSUKE_BACKEND_TAICHI_PBD))
+KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT, KITSUKE_BACKEND_TAICHI))
 
 _STATE_EPOCH_KEY = "yohsai_kitsuke_epoch"
 _STATE_REVISION_KEY = "yohsai_kitsuke_revision"
@@ -52,7 +50,6 @@ _STATE_SEAM_REST_KEY = "yohsai_kitsuke_seam_rest"
 _STATE_MATRIX_KEY = "yohsai_kitsuke_matrix"
 _STATE_BACKEND_KEY = "yohsai_kitsuke_backend"
 _VELOCITY_ATTRIBUTE = "yohsai_kitsuke_velocity"
-_ORIENTATION_ATTRIBUTES = tuple(f"yohsai_kitsuke_q{axis}" for axis in "wxyz")
 LOCKED_OBJECT_KEY = "yohsai_kitsuke_locked"
 _RUNTIME_EPOCH = uuid4().hex
 
@@ -75,6 +72,16 @@ class _BodySnapshot:
     faces: np.ndarray
     bvh: BVHTree
     ray_distance: float
+
+
+@dataclass(frozen=True)
+class _ClothTopology:
+    edges: np.ndarray
+    edge_rest_lengths: np.ndarray
+    quads: np.ndarray
+    quad_rest_metrics: np.ndarray
+    bends: np.ndarray
+    bend_rest_lengths: np.ndarray
 
 
 _sessions: dict[int, "_KitsukeSession"] = {}
@@ -114,7 +121,7 @@ def _read_persisted_state(
 ) -> tuple[int, np.ndarray, np.ndarray] | None:
     if not _persisted_state_is_current(collection):
         return None
-    stored_backend = str(collection.get(_STATE_BACKEND_KEY, KITSUKE_BACKEND_TAICHI_PBD))
+    stored_backend = str(collection.get(_STATE_BACKEND_KEY, KITSUKE_BACKEND_TAICHI))
     if backend is not None and stored_backend != backend:
         raise KitsukeError(
             f"The restored Kitsuke state uses {stored_backend}, not {backend}. "
@@ -178,74 +185,6 @@ def _write_velocity_state(part: _PartRange, velocities: np.ndarray) -> None:
     attribute.data.foreach_set("vector", np.asarray(velocities, dtype=np.float32).ravel())
 
 
-def _structural_edge_indices(mesh: bpy.types.Mesh) -> np.ndarray:
-    attribute = mesh.attributes.get(GRAINLINE_EDGE_FAMILY_ATTRIBUTE)
-    if attribute is None:
-        # Meshes loaded by 0.4.1 remain usable as the triangular baseline.
-        return np.arange(len(mesh.edges), dtype=np.int32)
-    if (
-        attribute.domain != "EDGE"
-        or attribute.data_type != "INT"
-        or len(attribute.data) != len(mesh.edges)
-    ):
-        raise KitsukeError("The grainline edge-family attribute is invalid. Load the pattern again.")
-    families = np.empty(len(mesh.edges), dtype=np.int32)
-    attribute.data.foreach_get("value", families)
-    return np.flatnonzero(families != GRAINLINE_EDGE_PROXY).astype(np.int32)
-
-
-def _read_orientation_state(parts: list[_PartRange]) -> np.ndarray:
-    blocks: list[np.ndarray] = []
-    for part in parts:
-        components: list[np.ndarray] = []
-        edge_count = len(part.obj.data.edges)
-        structural = _structural_edge_indices(part.obj.data)
-        for name in _ORIENTATION_ATTRIBUTES:
-            attribute = part.obj.data.attributes.get(name)
-            if (
-                attribute is None
-                or attribute.domain != "EDGE"
-                or attribute.data_type != "FLOAT"
-                or len(attribute.data) != edge_count
-            ):
-                raise KitsukeError(f"{part.obj.name} has no valid Stable Cosserat orientation state for Undo recovery.")
-            values = np.empty(edge_count, dtype=np.float32)
-            attribute.data.foreach_get("value", values)
-            components.append(values[structural])
-        block = np.stack(components, axis=1)
-        norms = np.linalg.norm(block, axis=1)
-        if not np.all(np.isfinite(block)) or np.any(norms < 0.99) or np.any(norms > 1.01):
-            raise KitsukeError(f"{part.obj.name} has an invalid Stable Cosserat orientation state.")
-        blocks.append(block)
-    return np.concatenate(blocks).astype(np.float32)
-
-
-def _write_orientation_state(parts: list[_PartRange], orientations: np.ndarray) -> None:
-    values = np.asarray(orientations, dtype=np.float32)
-    expected = sum(len(_structural_edge_indices(part.obj.data)) for part in parts)
-    if values.shape != (expected, 4) or not np.all(np.isfinite(values)):
-        raise KitsukeError("Stable Cosserat returned an invalid orientation state.")
-    offset = 0
-    for part in parts:
-        mesh = part.obj.data
-        structural = _structural_edge_indices(mesh)
-        count = len(structural)
-        block = values[offset : offset + count]
-        for component, name in enumerate(_ORIENTATION_ATTRIBUTES):
-            attribute = mesh.attributes.get(name)
-            if attribute is not None and (attribute.domain != "EDGE" or attribute.data_type != "FLOAT"):
-                mesh.attributes.remove(attribute)
-                attribute = None
-            if attribute is None:
-                attribute = mesh.attributes.new(name=name, type="FLOAT", domain="EDGE")
-            all_values = np.zeros(len(mesh.edges), dtype=np.float32)
-            if component == 0:
-                all_values.fill(1.0)
-            all_values[structural] = block[:, component]
-            attribute.data.foreach_set("value", all_values)
-        offset += count
-
-
 def _clear_persisted_state(collection: bpy.types.Collection) -> None:
     for key in (_STATE_EPOCH_KEY, _STATE_REVISION_KEY, _STATE_SEAMS_KEY, _STATE_SEAM_REST_KEY, _STATE_BACKEND_KEY):
         if key in collection:
@@ -256,10 +195,6 @@ def _clear_persisted_state(collection: bpy.types.Collection) -> None:
         attribute = obj.data.attributes.get(_VELOCITY_ATTRIBUTE)
         if attribute is not None:
             obj.data.attributes.remove(attribute)
-        for name in _ORIENTATION_ATTRIBUTES:
-            attribute = obj.data.attributes.get(name)
-            if attribute is not None:
-                obj.data.attributes.remove(attribute)
 
 
 def _sewn_preview(collection: bpy.types.Collection) -> bpy.types.Object | None:
@@ -269,163 +204,149 @@ def _sewn_preview(collection: bpy.types.Collection) -> bpy.types.Object | None:
     return previews[0] if previews else None
 
 
-def _triangles(mesh: bpy.types.Mesh, offset: int = 0) -> list[tuple[int, int, int]]:
-    mesh.calc_loop_triangles()
-    return [tuple(vertex + offset for vertex in triangle.vertices) for triangle in mesh.loop_triangles]
-
-
 def _world_vertices(obj: bpy.types.Object) -> np.ndarray:
     matrix = obj.matrix_world
     return np.asarray([tuple(matrix @ vertex.co) for vertex in obj.data.vertices], dtype=np.float32)
 
 
-def _pattern_rest_vertices(obj: bpy.types.Object) -> np.ndarray:
-    attribute = obj.data.attributes.get("yohsai_pattern_position")
-    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
-        raise KitsukeError(f"{obj.name} has no authoritative flat-pattern coordinates. Load the pattern again.")
-    return np.asarray([(item.vector[0], 0.0, item.vector[1]) for item in attribute.data], dtype=np.float32)
-
-
-def _director_rest_vertices(obj: bpy.types.Object) -> np.ndarray:
-    """Return non-degenerate geometry used only to initialize material frames."""
-    if not bool(obj.get("yohsai_ring_closed", False)):
-        return _pattern_rest_vertices(obj)
-    attribute = obj.data.attributes.get("yohsai_construction_position")
-    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
-        raise KitsukeError(f"{obj.name} has no RING construction coordinates for Stable Cosserat directors.")
-    values = np.asarray([tuple(item.vector) for item in attribute.data], dtype=np.float32)
-    if not np.all(np.isfinite(values)):
-        raise KitsukeError(f"{obj.name} has invalid RING construction coordinates.")
-    return values
-
-
-def _edge_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _cloth_topology(parts: list[_PartRange]) -> _ClothTopology:
+    """Read the Body-independent material metric stored on each pattern mesh."""
     edges: list[tuple[int, int]] = []
-    rest_values: list[float] = []
-    for part in parts:
-        attribute = part.obj.data.attributes.get("yohsai_pattern_edge_rest")
-        valid_attribute = (
-            attribute is not None
-            and attribute.domain == "EDGE"
-            and len(attribute.data) == len(part.obj.data.edges)
-        )
-        for edge_index in _structural_edge_indices(part.obj.data):
-            edge = part.obj.data.edges[int(edge_index)]
-            a = part.start + edge.vertices[0]
-            b = part.start + edge.vertices[1]
-            edges.append((a, b))
-            if valid_attribute:
-                rest_values.append(float(attribute.data[edge.index].value))
-            else:
-                rest_values.append(float(np.linalg.norm(rest_positions[a] - rest_positions[b])))
-    indices = np.asarray(edges, dtype=np.int32).reshape((-1, 2))
-    rest = np.asarray(rest_values, dtype=np.float32)
-    return indices, rest
-
-
-def _all_mesh_edges(parts: list[_PartRange]) -> np.ndarray:
-    edges = [
-        (part.start + edge.vertices[0], part.start + edge.vertices[1])
-        for part in parts
-        for edge in part.obj.data.edges
-    ]
-    return np.asarray(edges, dtype=np.int32).reshape((-1, 2))
-
-
-def _quad_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> np.ndarray:
+    edge_rest_lengths: list[float] = []
     quads: list[tuple[int, int, int, int]] = []
+    quad_rest_metrics: list[tuple[float, float, float]] = []
+    bends: list[tuple[int, int, int]] = []
+    bend_rest_lengths: list[tuple[float, float]] = []
+
     for part in parts:
         mesh = part.obj.data
-        attribute = mesh.attributes.get(GRAINLINE_FACE_QUAD_ATTRIBUTE)
-        if attribute is None:
-            continue
+        pattern_attribute = mesh.attributes.get("yohsai_pattern_position")
+        rest_attribute = mesh.attributes.get("yohsai_pattern_edge_rest")
+        family_attribute = mesh.attributes.get(GRAINLINE_EDGE_FAMILY_ATTRIBUTE)
+        quad_attribute = mesh.attributes.get(GRAINLINE_FACE_QUAD_ATTRIBUTE)
         if (
-            attribute.domain != "FACE"
-            or attribute.data_type != "INT"
-            or len(attribute.data) != len(mesh.polygons)
+            pattern_attribute is None
+            or pattern_attribute.domain != "POINT"
+            or pattern_attribute.data_type != "FLOAT_VECTOR"
+            or len(pattern_attribute.data) != len(mesh.vertices)
         ):
-            raise KitsukeError(f"{part.obj.name} has an invalid grainline quad attribute. Load it again.")
-        groups: dict[int, list[tuple[int, int, int]]] = {}
-        for polygon in mesh.polygons:
-            quad_index = int(attribute.data[polygon.index].value)
-            if quad_index < 0:
-                continue
-            if len(polygon.vertices) != 3:
-                raise KitsukeError(f"{part.obj.name} has a non-triangular grainline proxy face.")
-            groups.setdefault(quad_index, []).append(tuple(polygon.vertices))
-
-        local_rest = rest_positions[part.start : part.start + part.count]
-        for quad_index, triangles in sorted(groups.items()):
-            if len(triangles) != 2:
-                raise KitsukeError(
-                    f"{part.obj.name} grainline quad {quad_index} does not contain exactly two proxy triangles."
-                )
-            vertices = set(triangles[0]) | set(triangles[1])
-            if len(vertices) != 4 or len(set(triangles[0]) & set(triangles[1])) != 2:
-                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has invalid connectivity.")
-            xs = [float(local_rest[index, 0]) for index in vertices]
-            ys = [float(local_rest[index, 2]) for index in vertices]
-            min_x, max_x = min(xs), max(xs)
-            min_y, max_y = min(ys), max(ys)
-            width = max_x - min_x
-            height = max_y - min_y
-            if width <= 1.0e-8 or height <= 1.0e-8:
-                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} is degenerate.")
-            tolerance = max(width, height) * 1.0e-4 + 1.0e-7
-            targets = (
-                (min_x, min_y),
-                (max_x, min_y),
-                (max_x, max_y),
-                (min_x, max_y),
+            raise KitsukeError(
+                f"{part.obj.name} has no valid pattern coordinates. Load it again before Kitsuke."
             )
-            ordered: list[int] = []
-            for target_x, target_y in targets:
-                matches = [
-                    index
-                    for index in vertices
-                    if abs(float(local_rest[index, 0]) - target_x) <= tolerance
-                    and abs(float(local_rest[index, 2]) - target_y) <= tolerance
-                ]
-                if len(matches) != 1:
-                    raise KitsukeError(
-                        f"{part.obj.name} grainline quad {quad_index} is not aligned to page warp/weft."
-                    )
-                ordered.append(matches[0])
-            if len(set(ordered)) != 4:
-                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has repeated corners.")
-            shared = set(triangles[0]) & set(triangles[1])
-            if shared not in ({ordered[0], ordered[2]}, {ordered[1], ordered[3]}):
-                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has a non-diagonal split.")
-            quads.append(tuple(part.start + index for index in ordered))
-    return np.asarray(quads, dtype=np.int32).reshape((-1, 4))
+        if (
+            rest_attribute is None
+            or rest_attribute.domain != "EDGE"
+            or rest_attribute.data_type != "FLOAT"
+            or len(rest_attribute.data) != len(mesh.edges)
+        ):
+            raise KitsukeError(
+                f"{part.obj.name} has no valid material edge lengths. Load it again before Kitsuke."
+            )
+        if (
+            family_attribute is None
+            or family_attribute.domain != "EDGE"
+            or family_attribute.data_type != "INT"
+            or len(family_attribute.data) != len(mesh.edges)
+        ):
+            raise KitsukeError(
+                f"{part.obj.name} has no valid grainline edge families. Load it again before Kitsuke."
+            )
+        if (
+            quad_attribute is None
+            or quad_attribute.domain != "FACE"
+            or quad_attribute.data_type != "INT"
+            or len(quad_attribute.data) != len(mesh.polygons)
+        ):
+            raise KitsukeError(
+                f"{part.obj.name} has no valid grainline quad map. Load it again before Kitsuke."
+            )
 
+        pattern = np.asarray(
+            [tuple(float(value) for value in item.vector) for item in pattern_attribute.data],
+            dtype=np.float64,
+        )
+        families = np.asarray([int(item.value) for item in family_attribute.data], dtype=np.int32)
+        local_rest = np.asarray([float(item.value) for item in rest_attribute.data], dtype=np.float64)
+        if not np.all(np.isfinite(pattern)) or not np.all(np.isfinite(local_rest)):
+            raise KitsukeError(f"{part.obj.name} contains non-finite material rest data.")
 
-def _bending_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    pairs: list[tuple[int, int]] = []
-    rest_values: list[float] = []
-    for part in parts:
-        mesh = part.obj.data
-        local_rest = rest_positions[part.start:part.start + part.count]
-        if bool(part.obj.get("yohsai_ring_closed", False)):
-            attribute = mesh.attributes.get("yohsai_construction_position")
-            if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(mesh.vertices):
-                raise KitsukeError(f"{part.obj.name} has no RING construction coordinates.")
-            local_rest = np.asarray([tuple(item.vector) for item in attribute.data], dtype=np.float32)
-        mesh.calc_loop_triangles()
-        edge_opposites: dict[tuple[int, int], list[int]] = {}
-        for triangle in mesh.loop_triangles:
-            a, b, c = triangle.vertices
-            for edge, opposite in (((a, b), c), ((b, c), a), ((c, a), b)):
-                edge_opposites.setdefault(tuple(sorted(edge)), []).append(opposite)
-        for opposites in edge_opposites.values():
-            if len(opposites) == 2 and opposites[0] != opposites[1]:
-                pairs.append((part.start + opposites[0], part.start + opposites[1]))
-                rest_values.append(float(np.linalg.norm(local_rest[opposites[0]] - local_rest[opposites[1]])))
-    indices = np.asarray(pairs, dtype=np.int32).reshape((-1, 2))
-    if not len(indices):
-        return indices, np.empty(0, dtype=np.float32)
-    rest = np.asarray(rest_values, dtype=np.float32)
-    return indices, rest
+        axial_adjacency: dict[tuple[int, int], list[int]] = {}
+        for edge in mesh.edges:
+            family = int(families[edge.index])
+            if family == GRAINLINE_EDGE_PROXY:
+                continue
+            a, b = (int(value) for value in edge.vertices)
+            rest_length = float(local_rest[edge.index])
+            if not rest_length > 1.0e-8:
+                raise KitsukeError(f"{part.obj.name} contains a zero-length material edge.")
+            edges.append((part.start + a, part.start + b))
+            edge_rest_lengths.append(rest_length)
+            if family in (GRAINLINE_EDGE_WARP, GRAINLINE_EDGE_WEFT):
+                axial_adjacency.setdefault((family, a), []).append(b)
+                axial_adjacency.setdefault((family, b), []).append(a)
+
+        quad_groups: dict[int, set[int]] = {}
+        for polygon in mesh.polygons:
+            quad_index = int(quad_attribute.data[polygon.index].value)
+            if quad_index >= 0:
+                quad_groups.setdefault(quad_index, set()).update(int(value) for value in polygon.vertices)
+        for quad_index in sorted(quad_groups):
+            corners = quad_groups[quad_index]
+            if len(corners) != 4:
+                raise KitsukeError(
+                    f"{part.obj.name} grainline quad {quad_index} does not contain four shared vertices."
+                )
+            center = pattern[list(corners), :2].mean(axis=0)
+            ordered = sorted(
+                corners,
+                key=lambda vertex: float(
+                    np.arctan2(pattern[vertex, 1] - center[1], pattern[vertex, 0] - center[0])
+                ),
+            )
+            p0, p1, p2, p3 = (pattern[vertex] for vertex in ordered)
+            u = 0.5 * ((p1 - p0) + (p2 - p3))
+            v = 0.5 * ((p3 - p0) + (p2 - p1))
+            uu = float(np.dot(u, u))
+            vv = float(np.dot(v, v))
+            uv = float(np.dot(u, v))
+            if uu <= 1.0e-16 or vv <= 1.0e-16:
+                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has a degenerate metric.")
+            quads.append(tuple(part.start + vertex for vertex in ordered))
+            quad_rest_metrics.append((uu, vv, uv))
+
+        for (family, center_vertex), neighbors in sorted(axial_adjacency.items()):
+            if len(neighbors) < 2:
+                continue
+            best: tuple[float, int, int] | None = None
+            for left_index, left in enumerate(neighbors[:-1]):
+                left_direction = pattern[left, :2] - pattern[center_vertex, :2]
+                left_length = float(np.linalg.norm(left_direction))
+                if left_length <= 1.0e-8:
+                    continue
+                for right in neighbors[left_index + 1 :]:
+                    right_direction = pattern[right, :2] - pattern[center_vertex, :2]
+                    right_length = float(np.linalg.norm(right_direction))
+                    if right_length <= 1.0e-8:
+                        continue
+                    cosine = float(np.dot(left_direction, right_direction) / (left_length * right_length))
+                    if cosine <= -0.95 and (best is None or cosine < best[0]):
+                        best = (cosine, left, right)
+            if best is None:
+                continue
+            _cosine, left, right = best
+            left_length = float(np.linalg.norm(pattern[left] - pattern[center_vertex]))
+            right_length = float(np.linalg.norm(pattern[right] - pattern[center_vertex]))
+            bends.append((part.start + left, part.start + center_vertex, part.start + right))
+            bend_rest_lengths.append((left_length, right_length))
+
+    return _ClothTopology(
+        np.asarray(edges, dtype=np.int32).reshape((-1, 2)),
+        np.asarray(edge_rest_lengths, dtype=np.float32),
+        np.asarray(quads, dtype=np.int32).reshape((-1, 4)),
+        np.asarray(quad_rest_metrics, dtype=np.float32).reshape((-1, 3)),
+        np.asarray(bends, dtype=np.int32).reshape((-1, 3)),
+        np.asarray(bend_rest_lengths, dtype=np.float32).reshape((-1, 2)),
+    )
 
 
 def _seam_constraints(preview: bpy.types.Object, part_ranges: list[_PartRange]) -> np.ndarray:
@@ -477,6 +398,11 @@ def _body_snapshot(context, body: bpy.types.Object) -> _BodySnapshot:
         matrix = evaluated.matrix_world
         vertices = np.asarray([tuple(matrix @ vertex.co) for vertex in mesh.vertices], dtype=np.float32)
         faces = np.asarray([triangle.vertices[:] for triangle in mesh.loop_triangles], dtype=np.int32)
+        # A reflected Object/parent transform reverses geometric winding after
+        # vertices enter world space. Preserve the mesh's authored outward side
+        # so native Body contact cannot turn its push-out into an inward pull.
+        if matrix.to_3x3().determinant() < 0.0:
+            faces = faces[:, (0, 2, 1)]
     finally:
         evaluated.to_mesh_clear()
     if not len(vertices) or not len(faces):
@@ -547,44 +473,6 @@ def _project_body_penetrations(
     return changed
 
 
-def _triangle_grid(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    cell_size: float,
-    padding: float,
-) -> dict[tuple[int, int, int], list[int]]:
-    grid: dict[tuple[int, int, int], list[int]] = {}
-    for face_index, face in enumerate(faces):
-        points = vertices[face]
-        lower = np.floor((points.min(axis=0) - padding) / cell_size).astype(np.int32)
-        upper = np.floor((points.max(axis=0) + padding) / cell_size).astype(np.int32)
-        for x in range(int(lower[0]), int(upper[0]) + 1):
-            for y in range(int(lower[1]), int(upper[1]) + 1):
-                for z in range(int(lower[2]), int(upper[2]) + 1):
-                    grid.setdefault((x, y, z), []).append(face_index)
-    return grid
-
-
-def _collision_candidates(
-    query_vertices: np.ndarray,
-    triangle_vertices: np.ndarray,
-    faces: np.ndarray,
-    exclusions: dict[int, set[int]] | None = None,
-) -> np.ndarray:
-    cell_size = COLLISION_SEARCH_M
-    grid = _triangle_grid(triangle_vertices, faces, cell_size, CONTACT_THICKNESS_M)
-    pairs: list[tuple[int, int]] = []
-    for vertex_index, point in enumerate(query_vertices):
-        cell = tuple(np.floor(point / cell_size).astype(np.int32))
-        excluded = exclusions.get(vertex_index, set()) if exclusions else set()
-        for face_index in grid.get(cell, ()):
-            if face_index not in excluded:
-                pairs.append((vertex_index, face_index))
-    if not pairs:
-        return np.empty((0, 2), dtype=np.int32)
-    return np.asarray(pairs, dtype=np.int32)
-
-
 def _body_collision_candidates(positions: np.ndarray, body: _BodySnapshot) -> np.ndarray:
     """Return the nearest Body triangle for nearby or penetrating cloth vertices."""
     pairs: list[tuple[int, int]] = []
@@ -608,32 +496,6 @@ def _unlocked_body_collision_candidates(positions: np.ndarray, body: _BodySnapsh
     if not len(pairs):
         return pairs
     return pairs[locked[pairs[:, 0]] == 0]
-
-
-def _self_exclusions(
-    vertex_count: int,
-    faces: np.ndarray,
-    edges: np.ndarray,
-    seams: np.ndarray,
-) -> dict[int, set[int]]:
-    neighbors = [set((index,)) for index in range(vertex_count)]
-    for a, b in edges:
-        neighbors[int(a)].add(int(b))
-        neighbors[int(b)].add(int(a))
-    for a, b in seams:
-        neighbors[int(a)].update((int(b),))
-        neighbors[int(b)].update((int(a),))
-    vertex_faces: list[set[int]] = [set() for _ in range(vertex_count)]
-    for face_index, face in enumerate(faces):
-        for vertex in face:
-            vertex_faces[int(vertex)].add(face_index)
-    exclusions: dict[int, set[int]] = {}
-    for vertex in range(vertex_count):
-        excluded: set[int] = set()
-        for neighbor in neighbors[vertex]:
-            excluded.update(vertex_faces[neighbor])
-        exclusions[vertex] = excluded
-    return exclusions
 
 
 def _ensure_taichi():
@@ -662,38 +524,49 @@ def _ensure_taichi():
 def _create_runtime_type(ti):
     @ti.data_oriented
     class _TaichiRuntime:
-        def __init__(self, positions, velocities, edges, edge_rest, bends, bend_rest, seams, faces, body, locked):
+        def __init__(self, positions, velocities, seams, topology, body, locked):
             self.vertex_count = len(positions)
+            self.edge_count = len(topology.edges)
+            self.quad_count = len(topology.quads)
+            self.bend_count = len(topology.bends)
             self.x = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.previous = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.velocity = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.locked = ti.field(dtype=ti.i32, shape=self.vertex_count)
             self.delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.count = ti.field(dtype=ti.i32, shape=self.vertex_count)
-            self.seam_delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
-            self.seam_count = ti.field(dtype=ti.i32, shape=self.vertex_count)
-            self.edges = ti.Vector.field(2, dtype=ti.i32, shape=len(edges))
-            self.edge_rest = ti.field(dtype=ti.f32, shape=len(edges))
-            self.bends = ti.Vector.field(2, dtype=ti.i32, shape=max(len(bends), 1))
-            self.bend_rest = ti.field(dtype=ti.f32, shape=max(len(bends), 1))
-            self.bend_count = len(bends)
             self.seams = ti.Vector.field(2, dtype=ti.i32, shape=len(seams))
             self.seam_rest = ti.field(dtype=ti.f32, shape=len(seams))
-            self.faces = ti.Vector.field(3, dtype=ti.i32, shape=len(faces))
+            self.seam_captured = ti.field(dtype=ti.i32, shape=len(seams))
+            self.edges = ti.Vector.field(2, dtype=ti.i32, shape=max(1, self.edge_count))
+            self.edge_rest = ti.field(dtype=ti.f32, shape=max(1, self.edge_count))
+            self.quads = ti.Vector.field(4, dtype=ti.i32, shape=max(1, self.quad_count))
+            self.quad_rest = ti.Vector.field(3, dtype=ti.f32, shape=max(1, self.quad_count))
+            self.bends = ti.Vector.field(3, dtype=ti.i32, shape=max(1, self.bend_count))
+            self.bend_rest = ti.Vector.field(2, dtype=ti.f32, shape=max(1, self.bend_count))
             self.body_x = ti.Vector.field(3, dtype=ti.f32, shape=len(body.vertices))
             self.body_faces = ti.Vector.field(3, dtype=ti.i32, shape=len(body.faces))
             self.x.from_numpy(positions)
             self.velocity.from_numpy(velocities)
             self.locked.from_numpy(locked)
-            self.edges.from_numpy(edges)
-            self.edge_rest.from_numpy(edge_rest)
-            if len(bends):
-                self.bends.from_numpy(bends)
-                self.bend_rest.from_numpy(bend_rest)
             self.seams.from_numpy(seams)
-            seam_rest = np.linalg.norm(positions[seams[:, 0]] - positions[seams[:, 1]], axis=1).astype(np.float32)
+            seam_rest = np.zeros(len(seams), dtype=np.float32)
             self.seam_rest.from_numpy(seam_rest)
-            self.faces.from_numpy(faces)
+            seam_distances = np.linalg.norm(
+                positions[seams[:, 1]] - positions[seams[:, 0]], axis=1
+            )
+            self.seam_captured.from_numpy(
+                (seam_distances <= SEAM_CAPTURE_DISTANCE_M).astype(np.int32)
+            )
+            if self.edge_count:
+                self.edges.from_numpy(topology.edges)
+                self.edge_rest.from_numpy(topology.edge_rest_lengths)
+            if self.quad_count:
+                self.quads.from_numpy(topology.quads)
+                self.quad_rest.from_numpy(topology.quad_rest_metrics)
+            if self.bend_count:
+                self.bends.from_numpy(topology.bends)
+                self.bend_rest.from_numpy(topology.bend_rest_lengths)
             self.body_x.from_numpy(body.vertices)
             self.body_faces.from_numpy(body.faces)
 
@@ -726,87 +599,120 @@ def _create_runtime_type(ti):
                 self.delta[index] = ti.Vector.zero(ti.f32, 3)
                 self.count[index] = 0
 
-        @ti.kernel
-        def clear_seam_projection(self):
-            for index in range(self.vertex_count):
-                self.seam_delta[index] = ti.Vector.zero(ti.f32, 3)
-                self.seam_count[index] = 0
-
         @ti.func
-        def add_distance(self, a: ti.i32, b: ti.i32, rest: ti.f32, stiffness: ti.f32):
+        def add_distance_correction(self, a: ti.i32, b: ti.i32, target_length: ti.f32, relaxation: ti.f32):
             difference = self.x[b] - self.x[a]
             length = difference.norm()
             if length > 1.0e-8:
-                magnitude = (length - rest) * (0.5 * stiffness)
-                magnitude = ti.max(-MAX_CONSTRAINT_CORRECTION_M, ti.min(MAX_CONSTRAINT_CORRECTION_M, magnitude))
-                correction = difference * (magnitude / length)
-                for axis in ti.static(range(3)):
-                    ti.atomic_add(self.delta[a][axis], correction[axis])
-                    ti.atomic_add(self.delta[b][axis], -correction[axis])
-                ti.atomic_add(self.count[a], 1)
-                ti.atomic_add(self.count[b], 1)
-
-        @ti.func
-        def add_max_distance(self, a: ti.i32, b: ti.i32, max_length: ti.f32, stiffness: ti.f32):
-            difference = self.x[b] - self.x[a]
-            length = difference.norm()
-            if length > max_length and length > 1.0e-8:
-                magnitude = (length - max_length) * (0.5 * stiffness)
-                magnitude = ti.min(MAX_CONSTRAINT_CORRECTION_M, magnitude)
-                correction = difference * (magnitude / length)
-                for axis in ti.static(range(3)):
-                    ti.atomic_add(self.delta[a][axis], correction[axis])
-                    ti.atomic_add(self.delta[b][axis], -correction[axis])
-                ti.atomic_add(self.count[a], 1)
-                ti.atomic_add(self.count[b], 1)
-
-        @ti.func
-        def add_seam_projection(self, a: ti.i32, b: ti.i32, max_length: ti.f32):
-            difference = self.x[b] - self.x[a]
-            length = difference.norm()
-            if length > max_length and length > 1.0e-8:
-                unlocked = (1 - self.locked[a]) + (1 - self.locked[b])
-                if unlocked > 0:
-                    share = 1.0 / ti.cast(unlocked, ti.f32)
-                    correction = difference * (((length - max_length) * share) / length)
-                    if self.locked[a] == 0:
-                        for axis in ti.static(range(3)):
-                            ti.atomic_add(self.seam_delta[a][axis], correction[axis])
-                        ti.atomic_add(self.seam_count[a], 1)
-                    if self.locked[b] == 0:
-                        for axis in ti.static(range(3)):
-                            ti.atomic_add(self.seam_delta[b][axis], -correction[axis])
-                        ti.atomic_add(self.seam_count[b], 1)
+                free_a = 1 if self.locked[a] == 0 else 0
+                free_b = 1 if self.locked[b] == 0 else 0
+                weight = free_a + free_b
+                correction = difference * (relaxation * (length - target_length) / (length * ti.max(1, weight)))
+                if free_a:
+                    for axis in ti.static(range(3)):
+                        ti.atomic_add(self.delta[a][axis], correction[axis])
+                    ti.atomic_add(self.count[a], 1)
+                if free_b:
+                    for axis in ti.static(range(3)):
+                        ti.atomic_add(self.delta[b][axis], -correction[axis])
+                    ti.atomic_add(self.count[b], 1)
 
         @ti.kernel
-        def distance_corrections(self):
-            for index in self.edges:
-                pair = self.edges[index]
-                self.add_distance(pair[0], pair[1], self.edge_rest[index], 0.95)
+        def seam_corrections(self):
+            for index in self.seams:
+                if self.seam_captured[index] != 0:
+                    pair = self.seams[index]
+                    self.add_distance_correction(pair[0], pair[1], self.seam_rest[index], 1.0)
+
+        @ti.kernel
+        def apply_seam_attraction(self, dt: ti.f32):
+            for index in self.seams:
+                if self.seam_captured[index] == 0:
+                    pair = self.seams[index]
+                    difference = self.x[pair[1]] - self.x[pair[0]]
+                    length = difference.norm()
+                    if length > 1.0e-8:
+                        impulse = difference * (SEAM_ATTRACTION_FORCE * dt / length)
+                        if self.locked[pair[0]] == 0:
+                            for axis in ti.static(range(3)):
+                                ti.atomic_add(self.velocity[pair[0]][axis], impulse[axis])
+                        if self.locked[pair[1]] == 0:
+                            for axis in ti.static(range(3)):
+                                ti.atomic_add(self.velocity[pair[1]][axis], -impulse[axis])
+
+        @ti.kernel
+        def update_seam_capture(self):
+            for index in self.seams:
+                if self.seam_captured[index] == 0:
+                    pair = self.seams[index]
+                    current = self.x[pair[1]] - self.x[pair[0]]
+                    previous = self.previous[pair[1]] - self.previous[pair[0]]
+                    if current.norm() <= SEAM_CAPTURE_DISTANCE_M or current.dot(previous) <= 0.0:
+                        self.seam_captured[index] = 1
+
+        @ti.kernel
+        def stretch_corrections(self):
+            for index in range(self.edge_count):
+                edge = self.edges[index]
+                self.add_distance_correction(edge[0], edge[1], self.edge_rest[index], STRETCH_RELAXATION)
+
+        @ti.kernel
+        def shear_corrections(self):
+            for index in range(self.quad_count):
+                quad = self.quads[index]
+                x0 = self.x[quad[0]]
+                x1 = self.x[quad[1]]
+                x2 = self.x[quad[2]]
+                x3 = self.x[quad[3]]
+                u = 0.5 * ((x1 - x0) + (x2 - x3))
+                v = 0.5 * ((x3 - x0) + (x2 - x1))
+                value = u.dot(v) - self.quad_rest[index][2]
+                gradients = ti.Matrix.rows([
+                    -0.5 * (u + v),
+                    0.5 * (v - u),
+                    0.5 * (u + v),
+                    0.5 * (u - v),
+                ])
+                denominator = 0.0
+                for corner in ti.static(range(4)):
+                    if self.locked[quad[corner]] == 0:
+                        denominator += gradients[corner, 0] ** 2 + gradients[corner, 1] ** 2 + gradients[corner, 2] ** 2
+                if denominator > 1.0e-16:
+                    multiplier = -SHEAR_RELAXATION * value / denominator
+                    for corner in ti.static(range(4)):
+                        vertex = quad[corner]
+                        if self.locked[vertex] == 0:
+                            for axis in ti.static(range(3)):
+                                ti.atomic_add(self.delta[vertex][axis], multiplier * gradients[corner, axis])
+                            ti.atomic_add(self.count[vertex], 1)
+
+        @ti.kernel
+        def bend_corrections(self):
             for index in range(self.bend_count):
-                pair = self.bends[index]
-                self.add_distance(pair[0], pair[1], self.bend_rest[index], 0.08)
-            for index in self.seams:
-                pair = self.seams[index]
-                self.add_max_distance(pair[0], pair[1], self.seam_rest[index], 0.85)
-
-        @ti.kernel
-        def seam_projection_corrections(self):
-            for index in self.seams:
-                pair = self.seams[index]
-                self.add_seam_projection(pair[0], pair[1], self.seam_rest[index])
-
-        @ti.kernel
-        def tighten_seams(self, amount: ti.f32):
-            for index in self.seams:
-                self.seam_rest[index] = ti.max(0.0, self.seam_rest[index] - amount)
-
-        @ti.kernel
-        def ratchet_seams(self):
-            for index in self.seams:
-                pair = self.seams[index]
-                difference = self.x[pair[1]] - self.x[pair[0]]
-                self.seam_rest[index] = ti.min(self.seam_rest[index], difference.norm())
+                bend = self.bends[index]
+                rest = self.bend_rest[index]
+                coefficients = ti.Vector([
+                    1.0 / rest[0],
+                    -(1.0 / rest[0] + 1.0 / rest[1]),
+                    1.0 / rest[1],
+                ])
+                curvature = (
+                    coefficients[0] * self.x[bend[0]]
+                    + coefficients[1] * self.x[bend[1]]
+                    + coefficients[2] * self.x[bend[2]]
+                )
+                denominator = 0.0
+                for point in ti.static(range(3)):
+                    if self.locked[bend[point]] == 0:
+                        denominator += coefficients[point] ** 2
+                if denominator > 1.0e-8:
+                    for point in ti.static(range(3)):
+                        vertex = bend[point]
+                        if self.locked[vertex] == 0:
+                            scale = -BEND_RELAXATION * coefficients[point] / denominator
+                            for axis in ti.static(range(3)):
+                                ti.atomic_add(self.delta[vertex][axis], scale * curvature[axis])
+                            ti.atomic_add(self.count[vertex], 1)
 
         @ti.kernel
         def replace_seam_state(self, values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
@@ -818,12 +724,6 @@ def _create_runtime_type(ti):
             for index in range(self.vertex_count):
                 if self.locked[index] == 0 and self.count[index] > 0:
                     self.x[index] += self.delta[index] / ti.cast(self.count[index], ti.f32)
-
-        @ti.kernel
-        def apply_seam_projection(self):
-            for index in range(self.vertex_count):
-                if self.locked[index] == 0 and self.seam_count[index] > 0:
-                    self.x[index] += self.seam_delta[index] / ti.cast(self.seam_count[index], ti.f32)
 
         @ti.func
         def closest_triangle_point(self, point, a, b, c):
@@ -884,27 +784,9 @@ def _create_runtime_type(ti):
                 signed_distance = separation.dot(normal)
                 if distance < CONTACT_THICKNESS_M * 2.0 and signed_distance < CONTACT_THICKNESS_M:
                     correction = normal * (CONTACT_THICKNESS_M - signed_distance)
-                    for axis in ti.static(range(3)):
-                        ti.atomic_add(self.delta[vertex][axis], correction[axis])
-                    ti.atomic_add(self.count[vertex], 1)
-
-        @ti.kernel
-        def self_collisions(self, candidates: ti.types.ndarray(dtype=ti.i32, ndim=2), candidate_count: ti.i32):
-            for pair_index in range(candidate_count):
-                vertex = candidates[pair_index, 0]
-                triangle = self.faces[candidates[pair_index, 1]]
-                a = self.x[triangle[0]]
-                b = self.x[triangle[1]]
-                c = self.x[triangle[2]]
-                closest = self.closest_triangle_point(self.x[vertex], a, b, c)
-                separation = self.x[vertex] - closest
-                distance = separation.norm()
-                if distance < CONTACT_THICKNESS_M:
-                    normal = (b - a).cross(c - a).normalized(1.0e-8)
-                    direction = normal
-                    if distance > 1.0e-8:
-                        direction = separation / distance
-                    correction = direction * (CONTACT_THICKNESS_M - distance)
+                    correction_length = correction.norm()
+                    if correction_length > CONTACT_CORRECTION_MAX_M:
+                        correction *= CONTACT_CORRECTION_MAX_M / correction_length
                     for axis in ti.static(range(3)):
                         ti.atomic_add(self.delta[vertex][axis], correction[axis])
                     ti.atomic_add(self.count[vertex], 1)
@@ -913,35 +795,54 @@ def _create_runtime_type(ti):
         def update_velocities(self, dt: ti.f32):
             for index in range(self.vertex_count):
                 if self.locked[index] == 0:
-                    velocity = (self.x[index] - self.previous[index]) / dt
-                    speed = velocity.norm()
-                    if speed > MAX_SPEED_M_PER_SECOND:
-                        velocity *= MAX_SPEED_M_PER_SECOND / speed
-                    self.velocity[index] = velocity * ti.exp(-VELOCITY_DAMPING_PER_SECOND * dt)
+                    self.velocity[index] = (self.x[index] - self.previous[index]) / dt
                 else:
                     self.velocity[index] = ti.Vector.zero(ti.f32, 3)
 
-        def advance(self, body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations):
-            self.tighten_seams(seam_closure)
-            self.ratchet_seams()
+        def advance(self, body_candidates, gravity_magnitude, solver_iterations):
             for _step in range(STEPS_PER_CLICK):
+                self.apply_seam_attraction(TIME_STEP)
                 self.integrate(TIME_STEP, gravity_magnitude)
-                self.ratchet_seams()
+                self.update_seam_capture()
                 for _iteration in range(solver_iterations):
+                    self.update_seam_capture()
                     self.clear_corrections()
-                    self.distance_corrections()
+                    self.seam_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.shear_corrections()
+                    self.bend_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.stretch_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.stretch_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.stretch_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.stretch_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.seam_corrections()
                     self.apply_corrections()
                     self.clear_corrections()
                     if len(body_candidates):
                         self.body_collisions(body_candidates, len(body_candidates))
-                    if len(self_candidates):
-                        self.self_collisions(self_candidates, len(self_candidates))
                     self.apply_corrections()
-                    for _pass in range(SEAM_PROJECTION_PASSES):
-                        self.clear_seam_projection()
-                        self.seam_projection_corrections()
-                        self.apply_seam_projection()
-                    self.ratchet_seams()
+                for _cleanup in range(solver_iterations * 4):
+                    self.clear_corrections()
+                    self.stretch_corrections()
+                    self.apply_corrections()
+                    self.clear_corrections()
+                    self.seam_corrections()
+                    self.apply_corrections()
+                self.clear_corrections()
+                if len(body_candidates):
+                    self.body_collisions(body_candidates, len(body_candidates))
+                self.apply_corrections()
                 self.update_velocities(TIME_STEP)
 
         def state(self):
@@ -960,9 +861,6 @@ class _KitsukeSession:
             raise KitsukeError("Kitsuke needs at least two cloth objects.")
         ranges: list[_PartRange] = []
         position_blocks: list[np.ndarray] = []
-        rest_blocks: list[np.ndarray] = []
-        director_rest_blocks: list[np.ndarray] = []
-        faces: list[tuple[int, int, int]] = []
         locked_blocks: list[np.ndarray] = []
         offset = 0
         for obj in objects:
@@ -972,36 +870,15 @@ class _KitsukeSession:
             locked = bool(obj.get(LOCKED_OBJECT_KEY, False))
             ranges.append(_PartRange(obj, offset, len(block), locked))
             position_blocks.append(block)
-            rest_blocks.append(_pattern_rest_vertices(obj))
-            director_rest_blocks.append(_director_rest_vertices(obj))
             locked_blocks.append(np.full(len(block), 1 if locked else 0, dtype=np.int32))
-            faces.extend(_triangles(obj.data, offset))
             offset += len(block)
         self.collection = collection
         self.backend = backend
         self.parts = ranges
         self.positions = np.concatenate(position_blocks).astype(np.float32)
         self.locked = np.concatenate(locked_blocks).astype(np.int32)
-        rest_positions = np.concatenate(rest_blocks).astype(np.float32)
-        director_rest_positions = np.concatenate(director_rest_blocks).astype(np.float32)
-        self.faces = np.asarray(faces, dtype=np.int32).reshape((-1, 3))
-        self.edges, self.edge_rest = _edge_constraints(ranges, rest_positions)
-        self.all_edges = _all_mesh_edges(ranges)
-        self.quads = _quad_constraints(ranges, rest_positions)
-        self.bends, self.bend_rest = _bending_constraints(ranges, rest_positions)
         if preview is not None:
             self.seams = _seam_constraints(preview, ranges)
-            preview_positions = _world_vertices(preview)
-            if len(preview_positions) != len(self.positions) or not np.all(np.isfinite(preview_positions)):
-                raise KitsukeError("The Sewing preview contains invalid construction positions.")
-            # A verified Sewing construction pose is the first transient
-            # simulation state. Flat pattern coordinates remain the material
-            # rest state. @TUBE additionally needs this non-flat geometry for
-            # its initial material director frame; established flat/RING
-            # director initialization remains unchanged.
-            self.positions = preview_positions.astype(np.float32, copy=True)
-            if bool(preview.get("yohsai_tube_constructed", False)):
-                director_rest_positions = self.positions.copy()
         elif _persisted_state_is_current(collection):
             self.seams = _read_persisted_seams(collection, len(self.positions))
         else:
@@ -1013,6 +890,7 @@ class _KitsukeSession:
         else:
             self.revision, persisted_seams, self.velocities = persisted
         self.body = _body_snapshot(context, body)
+        self.topology = _cloth_topology(ranges)
         self.body_pointer = body.as_pointer()
         self.matrices = {part.obj.name: _matrix_tuple(part.obj.matrix_world) for part in ranges}
         self.preview = preview
@@ -1021,29 +899,18 @@ class _KitsukeSession:
                 self.runtime = NativeCosseratRuntime(
                     self.positions,
                     self.velocities,
-                    director_rest_positions,
-                    rest_positions,
-                    self.edges,
-                    self.edge_rest,
-                    self.quads,
                     self.seams,
-                    self.faces,
-                    self.all_edges,
+                    self.topology,
                     self.body,
                     self.locked,
-                    extension_compliance=KITSUKE_EXTENSION_COMPLIANCE,
                 )
             else:
                 _ti, runtime_type = _ensure_taichi()
                 self.runtime = runtime_type(
                     self.positions,
                     self.velocities,
-                    self.edges,
-                    self.edge_rest,
-                    self.bends,
-                    self.bend_rest,
                     self.seams,
-                    self.faces,
+                    self.topology,
                     self.body,
                     self.locked,
                 )
@@ -1051,13 +918,6 @@ class _KitsukeSession:
             raise KitsukeError(str(exc)) from exc
         if persisted is not None:
             self.runtime.replace_seam_state(persisted_seams)
-            if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-                self.runtime.replace_orientation_state(_read_orientation_state(ranges))
-        self.self_exclusions = (
-            None
-            if backend == KITSUKE_BACKEND_STABLE_COSSERAT
-            else _self_exclusions(len(self.positions), self.faces, self.all_edges, self.seams)
-        )
 
     def _read_user_transforms(self):
         context_changed = False
@@ -1106,12 +966,7 @@ class _KitsukeSession:
             # Blender mesh coordinates are the undoable authority. Keep the
             # live native state on their exact float32 round trip so the next
             # click and an Undo-reconstructed repeat start bit-for-bit alike.
-            self.runtime.replace_state(
-                self.positions,
-                self.velocities,
-                self.locked,
-                reinitialize_orientations=False,
-            )
+            self.runtime.replace_state(self.positions, self.velocities, self.locked)
         if self.preview is not None:
             mesh = self.preview.data
             bpy.data.objects.remove(self.preview, do_unlink=True)
@@ -1130,13 +985,6 @@ class _KitsukeSession:
             selection = self.velocities[part.start : part.start + part.count]
             _write_velocity_state(part, selection)
             part.obj[_STATE_MATRIX_KEY] = list(_matrix_tuple(part.obj.matrix_world))
-        if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-            orientations = self.runtime.orientation_state()
-            _write_orientation_state(self.parts, orientations)
-            # Reconstruction normalizes the persisted float32 quaternions.
-            # Apply the identical operation to the live runtime so ordinary
-            # continuation and an Undo-replayed click have the same state.
-            self.runtime.replace_orientation_state(orientations)
         self.revision += 1
         self.collection[_STATE_SEAMS_KEY] = [int(value) for value in self.seams.ravel()]
         self.collection[_STATE_SEAM_REST_KEY] = [float(value) for value in self.runtime.seam_state()]
@@ -1144,11 +992,10 @@ class _KitsukeSession:
         self.collection[_STATE_EPOCH_KEY] = _RUNTIME_EPOCH
         self.collection[_STATE_BACKEND_KEY] = self.backend
 
-    def advance(self, context, gravity_magnitude: float, seam_closure: float, solver_iterations: int):
+    def advance(self, context, gravity_magnitude: float, solver_iterations: int):
         self._read_user_transforms()
-        # The native solver resolves even deep Body penetrations incrementally so
-        # its material solve can distribute the correction through the sheet.
-        # Legacy PBD still needs its original one-shot preprojection path.
+        # The legacy backend retains a one-shot correction for vertices already
+        # inside Body; the native backend uses only its incremental contact path.
         if (
             self.backend != KITSUKE_BACKEND_STABLE_COSSERAT
             and _project_body_penetrations(self.body, self.positions, self.velocities, self.locked)
@@ -1157,70 +1004,31 @@ class _KitsukeSession:
         previous_positions = self.positions.copy()
         previous_velocities = self.velocities.copy()
         previous_seams = self.runtime.seam_state()
-        starting_edge_lengths = np.linalg.norm(
-            previous_positions[self.edges[:, 1]] - previous_positions[self.edges[:, 0]], axis=1
-        )
-        starting_maximum_strain = float(
-            np.max(np.abs(starting_edge_lengths / self.edge_rest - 1.0))
-        )
-        seam_distances = np.linalg.norm(
-            previous_positions[self.seams[:, 1]] - previous_positions[self.seams[:, 0]], axis=1
-        )
-        requested_seam_lengths = np.maximum(0.0, previous_seams - seam_closure)
-        maximum_seam_violation = float(
-            np.max(np.maximum(0.0, seam_distances - requested_seam_lengths))
-        ) if len(seam_distances) else 0.0
-        previous_orientations = (
-            self.runtime.orientation_state()
-            if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT
-            else None
-        )
         body_candidates = _unlocked_body_collision_candidates(self.positions, self.body, self.locked)
-        self_candidates = (
-            None
-            if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT
-            else _collision_candidates(
-                self.positions,
-                self.positions,
-                self.faces,
-                self.self_exclusions,
-            )
-        )
         try:
-            self.runtime.advance(body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations)
+            self.runtime.advance(body_candidates, gravity_magnitude, solver_iterations)
         except NativeCosseratError as exc:
             self.runtime.replace_state(previous_positions, previous_velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)
-            if previous_orientations is not None:
-                self.runtime.replace_orientation_state(previous_orientations)
             raise KitsukeError(str(exc)) from exc
         positions, velocities = self.runtime.state()
-        displacement = np.linalg.norm(positions - previous_positions, axis=1)
-        maximum_displacement = float(displacement.max()) if len(displacement) else 0.0
-        if (
-            not np.all(np.isfinite(positions))
-            or not np.all(np.isfinite(velocities))
-            or maximum_displacement > MAX_DISPLACEMENT_PER_CLICK_M
-        ):
+        if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(velocities)):
             self.positions = previous_positions
             self.velocities = previous_velocities
             self.runtime.replace_state(self.positions, self.velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)
-            if previous_orientations is not None:
-                self.runtime.replace_orientation_state(previous_orientations)
             native_detail = ""
             if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
                 stats = self.runtime.last_stats
                 native_detail = (
-                    f", starting strain {starting_maximum_strain:.3g}, "
-                    f"requested seam move {maximum_seam_violation:.3g} m, "
-                    f"native strain {float(stats.get('maximum_edge_strain', 0.0)):.3g}, "
-                    f"stretch energy {float(stats.get('stretch_energy', 0.0)):.3g}, "
-                    f"contacts {int(stats.get('body_candidate_count', 0))}/"
-                    f"{int(stats.get('self_candidate_count', 0))}"
+                    f"material {int(stats.get('edge_count', 0))} edges/"
+                    f"{int(stats.get('quad_count', 0))} quads/"
+                    f"{int(stats.get('bend_count', 0))} bends, "
+                    f"Body candidates {int(stats.get('body_candidate_count', 0))}"
                 )
+            detail = f"; {native_detail}" if native_detail else ""
             raise KitsukeError(
-                f"The simulation became unstable ({maximum_displacement:.3f} m maximum movement{native_detail}) "
+                f"The simulation returned a non-finite state{detail} "
                 "and was rolled back without changing the cloth."
             )
         self.positions, self.velocities = positions, velocities
@@ -1233,7 +1041,6 @@ def advance_kitsuke(
     collection: bpy.types.Collection,
     body: bpy.types.Object,
     gravity_magnitude: float,
-    seam_closure: float,
     solver_iterations: int = SOLVER_ITERATIONS,
     backend: str = DEFAULT_KITSUKE_BACKEND,
 ) -> str:
@@ -1263,30 +1070,17 @@ def advance_kitsuke(
         raise KitsukeError(
             f"This live Kitsuke session uses {session.backend}. Undo to Sewing or reload the pattern before changing solvers."
         )
-    session.advance(context, gravity_magnitude, seam_closure, solver_iterations)
+    session.advance(context, gravity_magnitude, solver_iterations)
     if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-        edge_lengths = np.linalg.norm(
-            session.positions[session.edges[:, 1]] - session.positions[session.edges[:, 0]],
-            axis=1,
-        )
-        edge_errors = np.abs(edge_lengths - session.edge_rest)
-        normal_edges = session.edge_rest >= 0.001
-        maximum_normal_strain = float(
-            np.max(edge_errors[normal_edges] / session.edge_rest[normal_edges])
-        ) if np.any(normal_edges) else 0.0
-        short_edges = ~normal_edges
-        maximum_short_error = float(np.max(edge_errors[short_edges])) if np.any(short_edges) else 0.0
         return (
-            f"Kitsuke: Stable Cosserat CPU, {STEPS_PER_CLICK} steps x {solver_iterations} iterations; "
-            f"{session.runtime.quad_count} grain quads, {session.runtime.angle_count} rod joints, "
-            f"normal strain {maximum_normal_strain:.3g}, short-edge error {maximum_short_error * 1.0e6:.3g} µm; "
-            f"seam {seam_closure * 1000.0:.3g} mm"
+            f"Kitsuke: square-lattice cloth + constant-force seams, {STEPS_PER_CLICK} steps; "
+            f"material/contact {solver_iterations} iterations; gravity -Z {gravity_magnitude:.3g} m/s²"
         )
     ti, _runtime = _ensure_taichi()
     arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     return (
         f"Kitsuke: {STEPS_PER_CLICK} steps x {solver_iterations} iterations on {arch}; "
-        f"gravity {gravity_magnitude:.3g} m/s², seam {seam_closure * 1000.0:.3g} mm"
+        f"gravity -Z {gravity_magnitude:.3g} m/s², constant-force seams"
     )
 
 

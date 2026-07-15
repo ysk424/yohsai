@@ -56,33 +56,14 @@ try:
 
     session = kitsuke._sessions[collection.as_pointer()]
     positions, velocities = session.runtime.state()
-    orientations = session.runtime.orientation_state()
     seams = session.runtime.seam_state()
     stats = session.runtime.last_stats
-    edge_lengths = np.linalg.norm(
-        positions[session.edges[:, 1]] - positions[session.edges[:, 0]], axis=1
-    )
-    edge_error = np.abs(edge_lengths - session.edge_rest)
-    edge_strain = np.abs(edge_lengths / session.edge_rest - 1.0)
-    maximum_edge = int(np.argmax(edge_strain))
-    five_mm = np.abs(session.edge_rest - 0.005) <= 5.0e-7
-    normal_edges = session.edge_rest >= 0.001
-    short_edges = ~normal_edges
-    assert float(np.max(edge_strain[normal_edges])) <= 1.0e-4
-    assert float(np.max(edge_error[short_edges])) <= 1.0e-6
     print(
         "YOHSAI_THREAD_HASH",
         f"threads={os.environ.get('OMP_NUM_THREADS', 'default')}",
-        f"state={state_hash(positions, velocities, orientations, seams)}",
-        f"candidates={stats['self_candidate_count']}",
-        f"rebuilds={stats['self_broad_phase_rebuilds']}",
-        f"tests={stats['self_candidate_tests']}",
-        f"max_strain={float(np.max(edge_strain)):.9g}",
-        f"p95_strain={float(np.percentile(edge_strain, 95.0)):.9g}",
-        f"max_rest={float(session.edge_rest[maximum_edge]):.9g}",
-        f"max_length={float(edge_lengths[maximum_edge]):.9g}",
-        f"grid_max_strain={float(np.max(edge_strain[five_mm])):.9g}",
-        f"grid_p95_strain={float(np.percentile(edge_strain[five_mm], 95.0)):.9g}",
+        f"state={state_hash(positions, velocities, seams)}",
+        f"body_candidates={stats['body_candidate_count']}",
+        f"maximum_displacement={stats['maximum_displacement']:.9g}",
     )
 finally:
     yohsai.unregister()

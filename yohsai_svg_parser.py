@@ -143,7 +143,6 @@ class Panel:
     update_label: str | None = None
     mirror: bool = False
     top: Point | None = None
-    tube: bool = False
 
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -601,11 +600,6 @@ def _collect_pdf_annotations(
             if panel.top is not None:
                 raise ParseError(f"Panel {panel.panel_id!r} contains more than one @TOP command.")
             panel.top = annotation.position
-        elif normalized == "@TUBE":
-            panel = _panel_for_internal_command(annotation, panels)
-            if panel.tube:
-                raise ParseError(f"Panel {panel.panel_id!r} contains more than one @TUBE command.")
-            panel.tube = True
         else:
             panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
             if normalized == "@W":
@@ -629,20 +623,11 @@ def _collect_pdf_annotations(
         _expand_ring_bounded_sewing(panel)
         if panel.top is not None and not any(segment.ring for segment in panel.segments):
             raise ParseError(f"Panel {panel.panel_id!r} uses @TOP without two RING edges.")
-        if panel.tube and any(segment.ring for segment in panel.segments):
-            raise ParseError(f"Panel {panel.panel_id!r} cannot combine @TUBE and RING construction.")
-        if panel.tube and panel.mirror:
-            raise ParseError(f"Panel {panel.panel_id!r} cannot combine @TUBE and @M in version 1.")
         for segment_index, segment in enumerate(panel.segments):
             if segment.sewing_group:
                 sewing_groups.setdefault(segment.sewing_group, []).append(
                     {"panel": panel.panel_id, "segment": segment_index}
                 )
-    tube_panels = [panel for panel in panels if panel.tube]
-    if tube_panels and len(tube_panels) != 2:
-        raise ParseError(
-            f"@TUBE version 1 requires exactly two annotated panels; found {len(tube_panels)}."
-        )
     return sewing_groups
 
 
@@ -1017,7 +1002,6 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
                 "closed": True,
                 "mirror": panel.mirror,
                 "top": panel.top.as_json(_PDF_METERS_PER_POINT) if panel.top else None,
-                "tube": panel.tube,
                 "segments": [
                     _serialize_segment(segment, index, _PDF_METERS_PER_POINT)
                     for index, segment in enumerate(panel.segments)

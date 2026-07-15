@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import math
 import json
-from bisect import bisect_left
 from dataclasses import dataclass
 from itertools import permutations
 from typing import Any, Iterable
@@ -17,10 +16,6 @@ from mathutils.geometry import barycentric_transform, delaunay_2d_cdt
 
 
 MESH_SPACING_M = 0.005
-TUBE_CONTACT_THICKNESS_M = 0.005
-TUBE_RADIUS_STEP_M = 0.010
-TUBE_MAX_CANDIDATES = 99
-TUBE_REFINEMENT_STEPS = 4
 PANEL_GAP_M = 0.10
 WORLD_Y_M = -1.0
 BOTTOM_Z_M = 0.01
@@ -69,7 +64,6 @@ class PanelGeometry:
     quads: list[tuple[int, int, int, int]]
     face_quads: dict[tuple[int, ...], int]
     ring_closed: bool
-    tube: bool
 
 
 def _point(value: object, field: str) -> Vector:
@@ -706,26 +700,10 @@ def _triangulate_panel(
         quads=quads,
         face_quads=face_quads,
         ring_closed=ring_closed,
-        tube=bool(panel.get("tube", False)),
     )
 
 
 def _panel_geometries(panels: list[dict[str, Any]], spacing: float) -> list[PanelGeometry]:
-    tube_panels = [panel for panel in panels if bool(panel.get("tube", False))]
-    if tube_panels and len(tube_panels) != 2:
-        raise MeshLoadError(
-            f"@TUBE version 1 requires exactly two annotated panels; found {len(tube_panels)}."
-        )
-    for panel in tube_panels:
-        if bool(panel.get("mirror", False)):
-            raise MeshLoadError(
-                f"Panel {panel.get('id')!r} cannot combine @TUBE and @M in version 1."
-            )
-        segments = panel.get("segments")
-        if isinstance(segments, list) and any(bool(segment.get("ring", False)) for segment in segments):
-            raise MeshLoadError(
-                f"Panel {panel.get('id')!r} cannot combine @TUBE and RING construction."
-            )
     result: list[PanelGeometry] = []
     for panel in panels:
         if bool(panel.get("mirror", False)):
@@ -856,7 +834,6 @@ def _sewing_signature(document: dict[str, Any]) -> str:
             "id": str(panel.get("id", "")),
             "mirror": bool(panel.get("mirror", False)),
             "top": panel.get("top"),
-            "tube": bool(panel.get("tube", False)),
             "ring": [index for index, segment in enumerate(segments) if bool(segment.get("ring", False))],
         })
     return json.dumps(
@@ -914,7 +891,6 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
             obj["yohsai_panel_index"] = panel_index
             obj["yohsai_mirror_side"] = panel.mirror_side
             obj["yohsai_ring_closed"] = panel.ring_closed
-            obj["yohsai_tube"] = panel.tube
 
         collection["yohsai_schema"] = "yohsai-pattern/1.0.0"
         collection["yohsai_role"] = "clothes"
@@ -1102,7 +1078,6 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
         obj["yohsai_panel_instance"] = panel.instance_id
         obj["yohsai_mirror_side"] = panel.mirror_side
         obj["yohsai_ring_closed"] = panel.ring_closed
-        obj["yohsai_tube"] = panel.tube
         obj.hide_set(False)
         obj.hide_render = False
     _remove_sewn_preview(collection)
@@ -1459,16 +1434,6 @@ class SewingPlan:
     connections: tuple[tuple[str, int, int], ...]
 
 
-@dataclass
-class _TubeRail:
-    label: str
-    chains: tuple[_SeamChain, _SeamChain]
-    world_nodes: list[tuple[float, Vector]]
-    vertex_parameters: dict[tuple[bpy.types.Object, int], float]
-    pattern_x_nodes: dict[bpy.types.Object, list[tuple[float, float]]]
-    pattern_y_nodes: dict[bpy.types.Object, list[tuple[float, float]]]
-
-
 def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
     """Validate and return reusable global-index sewing connections for separate parts."""
     if collection is None or collection.get("yohsai_role") != "clothes":
@@ -1512,533 +1477,9 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
     return SewingPlan(parts, labels, tuple(connections))
 
 
-def _tube_pattern_points(obj: bpy.types.Object) -> list[Vector]:
-    attribute = obj.data.attributes.get("yohsai_pattern_position")
-    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
-        raise SewingError(f"{obj.name} has no authoritative pattern coordinates for @TUBE construction.")
-    return [Vector((float(item.vector[0]), float(item.vector[1]))) for item in attribute.data]
-
-
-def _tube_long_rail_pairs(plan: SewingPlan) -> tuple[tuple[str, _SeamChain, _SeamChain], ...]:
-    tube_parts = tuple(part for part in plan.parts if bool(part.get("yohsai_tube", False)))
-    if not tube_parts:
-        return ()
-    if len(tube_parts) != 2:
-        raise SewingError(f"@TUBE version 1 requires exactly two annotated panel objects; found {len(tube_parts)}.")
-    first, second = tube_parts
-    patterns = {part: _tube_pattern_points(part) for part in tube_parts}
-    warp_extent = {
-        part: max(point.y for point in points) - min(point.y for point in points)
-        for part, points in patterns.items()
-    }
-    if any(extent <= MESH_SPACING_M * 4.0 for extent in warp_extent.values()):
-        raise SewingError("@TUBE panels must have a usable pattern-page warp extent.")
-
-    rails: list[tuple[str, _SeamChain, _SeamChain]] = []
-    shared_labels = sorted(_sewing_labels(first.data) & _sewing_labels(second.data))
-    for label in shared_labels:
-        first_chains = _seam_chains(first, label)
-        second_chains = _seam_chains(second, label)
-        if not first_chains or not second_chains:
-            continue
-        if any(chain.closed for chain in first_chains + second_chains):
-            continue
-        for first_chain, second_chain in _pair_chains(first_chains, second_chains, label):
-            first_span = max(patterns[first][index].y for index in first_chain.vertices) - min(
-                patterns[first][index].y for index in first_chain.vertices
-            )
-            second_span = max(patterns[second][index].y for index in second_chain.vertices) - min(
-                patterns[second][index].y for index in second_chain.vertices
-            )
-            first_length = sum(first_chain.edge_lengths)
-            second_length = sum(second_chain.edge_lengths)
-            if (
-                first_span >= warp_extent[first] * 0.5
-                and second_span >= warp_extent[second] * 0.5
-                and first_length >= warp_extent[first] * 0.5
-                and second_length >= warp_extent[second] * 0.5
-            ):
-                rails.append((label, first_chain, second_chain))
-    if len(rails) != 2:
-        raise SewingError(
-            "@TUBE version 1 needs exactly two paired open sewing paths spanning at least half "
-            f"of both panels' pattern-page warp extent; found {len(rails)}."
-        )
-    for part_index, part in enumerate(tube_parts):
-        if set(rails[0][part_index + 1].vertices) & set(rails[1][part_index + 1].vertices):
-            raise SewingError(f"The two @TUBE rails share vertices on {part.name}.")
-    return tuple(rails)
-
-
-def _merged_curve_nodes(nodes: list[tuple[float, object]]) -> list[tuple[float, object]]:
-    if not nodes:
-        raise SewingError("@TUBE construction produced an empty interpolation curve.")
-    ordered = sorted(nodes, key=lambda item: item[0])
-    groups: list[list[tuple[float, object]]] = []
-    for node in ordered:
-        if groups and abs(node[0] - groups[-1][-1][0]) <= 1.0e-7:
-            groups[-1].append(node)
-        else:
-            groups.append([node])
-    merged: list[tuple[float, object]] = []
-    for group in groups:
-        parameter = sum(item[0] for item in group) / len(group)
-        value = group[0][1] * 0.0
-        for _parameter, item in group:
-            value += item
-        merged.append((parameter, value / len(group)))
-    return merged
-
-
-def _curve_value(nodes: list[tuple[float, object]], parameter: float):
-    parameter = max(0.0, min(1.0, float(parameter)))
-    keys = [item[0] for item in nodes]
-    index = bisect_left(keys, parameter)
-    if index <= 0:
-        return nodes[0][1].copy() if hasattr(nodes[0][1], "copy") else nodes[0][1]
-    if index >= len(nodes):
-        return nodes[-1][1].copy() if hasattr(nodes[-1][1], "copy") else nodes[-1][1]
-    left_parameter, left = nodes[index - 1]
-    right_parameter, right = nodes[index]
-    span = right_parameter - left_parameter
-    if span <= 1.0e-12:
-        return left.copy() if hasattr(left, "copy") else left
-    factor = (parameter - left_parameter) / span
-    return left * (1.0 - factor) + right * factor
-
-
-def _build_tube_rail(
-    label: str,
-    first: _SeamChain,
-    second: _SeamChain,
-) -> _TubeRail:
-    first_pattern = _tube_pattern_points(first.obj)
-    second_pattern = _tube_pattern_points(second.obj)
-    first_parameters = _cumulative_positions(first.edge_lengths, len(first.vertices))
-    forward_cost = _direction_cost(first, second, False)
-    reverse_cost = _direction_cost(first, second, True)
-    if abs(forward_cost - reverse_cost) <= 1.0e-6:
-        raise SewingError(f"Sewing direction for @TUBE rail {label} is ambiguous; move the parts closer.")
-    second_vertices = list(second.vertices)
-    second_points = list(second.world_points)
-    second_lengths = list(second.edge_lengths)
-    if reverse_cost < forward_cost:
-        second_vertices.reverse()
-        second_points.reverse()
-        second_lengths.reverse()
-    second_parameters = _cumulative_positions(tuple(second_lengths), len(second_vertices))
-
-    # Pattern-page warp defines increasing tube longitude. Apply the same flip
-    # to both paired paths so their normalized parameters stay physically
-    # aligned without collapsing the many-to-one sewing spring graph.
-    if first_pattern[first.vertices[-1]].y < first_pattern[first.vertices[0]].y:
-        first_parameters = [1.0 - value for value in first_parameters]
-        second_parameters = [1.0 - value for value in second_parameters]
-
-    vertex_parameters = {
-        **{(first.obj, vertex): parameter for vertex, parameter in zip(first.vertices, first_parameters)},
-        **{(second.obj, vertex): parameter for vertex, parameter in zip(second_vertices, second_parameters)},
-    }
-    first_world_nodes = _merged_curve_nodes(list(zip(first_parameters, first.world_points)))
-    second_world_nodes = _merged_curve_nodes(list(zip(second_parameters, second_points)))
-    shared_parameters = sorted(set(first_parameters) | set(second_parameters))
-    world_nodes = [
-        (
-            parameter,
-            (_curve_value(first_world_nodes, parameter) + _curve_value(second_world_nodes, parameter)) * 0.5,
-        )
-        for parameter in shared_parameters
-    ]
-
-    pattern_x_nodes = {
-        first.obj: _merged_curve_nodes([
-            (vertex_parameters[(first.obj, vertex)], first_pattern[vertex].x)
-            for vertex in first.vertices
-        ]),
-        second.obj: _merged_curve_nodes([
-            (vertex_parameters[(second.obj, vertex)], second_pattern[vertex].x)
-            for vertex in second.vertices
-        ]),
-    }
-    pattern_y_nodes = {
-        first.obj: _merged_curve_nodes([
-            (vertex_parameters[(first.obj, vertex)], first_pattern[vertex].y)
-            for vertex in first.vertices
-        ]),
-        second.obj: _merged_curve_nodes([
-            (vertex_parameters[(second.obj, vertex)], second_pattern[vertex].y)
-            for vertex in second.vertices
-        ]),
-    }
-    return _TubeRail(
-        label,
-        (first, second),
-        _merged_curve_nodes(world_nodes),
-        vertex_parameters,
-        pattern_x_nodes,
-        pattern_y_nodes,
-    )
-
-
-def _tube_body_snapshot(context, body: bpy.types.Object) -> tuple[BVHTree, Vector]:
-    if body is None:
-        raise SewingError("Select a mesh Body before Sewing @TUBE panels.")
-    if body.type != "MESH":
-        raise SewingError(f"Body '{body.name}' is {body.type}, not MESH.")
-    depsgraph = context.evaluated_depsgraph_get()
-    evaluated = body.evaluated_get(depsgraph)
-    mesh = evaluated.to_mesh()
-    try:
-        mesh.calc_loop_triangles()
-        matrix = evaluated.matrix_world
-        vertices = [matrix @ vertex.co for vertex in mesh.vertices]
-        faces = [tuple(triangle.vertices) for triangle in mesh.loop_triangles]
-    finally:
-        evaluated.to_mesh_clear()
-    if not vertices or not faces:
-        raise SewingError("Body has no triangles for @TUBE contact search.")
-    bvh = BVHTree.FromPolygons(vertices, faces, all_triangles=True)
-    lower = Vector((min(point.x for point in vertices), min(point.y for point in vertices), min(point.z for point in vertices)))
-    upper = Vector((max(point.x for point in vertices), max(point.y for point in vertices), max(point.z for point in vertices)))
-    return bvh, (lower + upper) * 0.5
-
-
-def _tube_pattern_parameter_samples(
-    part: bpy.types.Object,
-    rails: tuple[_TubeRail, _TubeRail],
-) -> list[tuple[float, float]]:
-    samples: list[tuple[float, float]] = []
-    for index in range(65):
-        parameter = index / 64.0
-        center_y = 0.5 * (
-            float(_curve_value(rails[0].pattern_y_nodes[part], parameter))
-            + float(_curve_value(rails[1].pattern_y_nodes[part], parameter))
-        )
-        samples.append((center_y, parameter))
-    samples.sort(key=lambda item: item[0])
-    return samples
-
-
-def _tube_pattern_parameter(samples: list[tuple[float, float]], pattern_y: float) -> float:
-    values = [item[0] for item in samples]
-    index = bisect_left(values, pattern_y)
-    if index <= 0:
-        return samples[0][1]
-    if index >= len(samples):
-        return samples[-1][1]
-    left_y, left_parameter = samples[index - 1]
-    right_y, right_parameter = samples[index]
-    if right_y - left_y <= 1.0e-12:
-        return 0.5 * (left_parameter + right_parameter)
-    factor = (pattern_y - left_y) / (right_y - left_y)
-    return left_parameter * (1.0 - factor) + right_parameter * factor
-
-
-def _tube_half_angle(width: float, chord: float) -> float:
-    if width <= 1.0e-8 or chord <= 1.0e-8 or chord > width * (1.0 + 1.0e-6):
-        raise SewingError("@TUBE produced an invalid transverse width or rail chord.")
-    if chord >= width * (1.0 - 1.0e-8):
-        return 0.0
-    target = chord / width
-    minimum = 2.0 / math.pi
-    if target < minimum - 1.0e-6:
-        raise SewingError("@TUBE would need more than a semicircle to preserve a panel's authored width.")
-    lower = 0.0
-    upper = math.pi * 0.5
-    for _iteration in range(40):
-        middle = 0.5 * (lower + upper)
-        ratio = math.sin(middle) / middle
-        if ratio > target:
-            lower = middle
-        else:
-            upper = middle
-    return 0.5 * (lower + upper)
-
-
-def _tube_construction_positions(
-    context,
-    plan: SewingPlan,
-    source_positions: list[Vector],
-    body: bpy.types.Object,
-) -> tuple[list[Vector], float, int, float]:
-    rail_pairs = _tube_long_rail_pairs(plan)
-    if not rail_pairs:
-        return source_positions, math.inf, 0, math.inf
-    tube_parts = tuple(part for part in plan.parts if bool(part.get("yohsai_tube", False)))
-    rails = tuple(_build_tube_rail(*pair) for pair in rail_pairs)
-    bvh, body_center = _tube_body_snapshot(context, body)
-
-    offsets: dict[bpy.types.Object, int] = {}
-    offset = 0
-    for part in plan.parts:
-        offsets[part] = offset
-        offset += len(part.data.vertices)
-    patterns = {part: _tube_pattern_points(part) for part in tube_parts}
-    parameter_samples = {
-        part: _tube_pattern_parameter_samples(part, rails)
-        for part in tube_parts
-    }
-    rail_vertex_sets = {
-        (rail_index, part): set(rails[rail_index].chains[part_index].vertices)
-        for rail_index in range(2)
-        for part_index, part in enumerate(tube_parts)
-    }
-
-    endpoint_pattern_y: dict[bpy.types.Object, tuple[float, float, float]] = {}
-    for part in tube_parts:
-        first_y = 0.5 * (
-            float(_curve_value(rails[0].pattern_y_nodes[part], 0.0))
-            + float(_curve_value(rails[1].pattern_y_nodes[part], 0.0))
-        )
-        second_y = 0.5 * (
-            float(_curve_value(rails[0].pattern_y_nodes[part], 1.0))
-            + float(_curve_value(rails[1].pattern_y_nodes[part], 1.0))
-        )
-        if abs(second_y - first_y) <= MESH_SPACING_M:
-            raise SewingError(f"@TUBE rails have no longitudinal pattern span on {part.name}.")
-        endpoint_pattern_y[part] = (first_y, second_y, 1.0 if second_y > first_y else -1.0)
-
-    specifications: dict[int, tuple[float, float, int, float]] = {}
-    tube_indices: list[int] = []
-    section_parameters: set[float] = set()
-    for part_index, part in enumerate(tube_parts):
-        for vertex_index, pattern in enumerate(patterns[part]):
-            on_first = vertex_index in rail_vertex_sets[(0, part)]
-            on_second = vertex_index in rail_vertex_sets[(1, part)]
-            if on_first and on_second:
-                raise SewingError(f"The two @TUBE rails meet at vertex {vertex_index} on {part.name}.")
-            if on_first:
-                parameter = rails[0].vertex_parameters[(part, vertex_index)]
-                transverse = 0.0
-            elif on_second:
-                parameter = rails[1].vertex_parameters[(part, vertex_index)]
-                transverse = 1.0
-            else:
-                first_y, second_y, pattern_direction = endpoint_pattern_y[part]
-                minimum_y = min(first_y, second_y)
-                maximum_y = max(first_y, second_y)
-                longitudinal_offset = 0.0
-                if pattern.y < minimum_y:
-                    parameter = 0.0 if first_y < second_y else 1.0
-                    endpoint_y = first_y if parameter == 0.0 else second_y
-                    longitudinal_offset = (pattern.y - endpoint_y) * pattern_direction
-                elif pattern.y > maximum_y:
-                    parameter = 1.0 if first_y < second_y else 0.0
-                    endpoint_y = second_y if parameter == 1.0 else first_y
-                    longitudinal_offset = (pattern.y - endpoint_y) * pattern_direction
-                else:
-                    parameter = _tube_pattern_parameter(parameter_samples[part], pattern.y)
-                first_x = float(_curve_value(rails[0].pattern_x_nodes[part], parameter))
-                second_x = float(_curve_value(rails[1].pattern_x_nodes[part], parameter))
-                denominator = second_x - first_x
-                if abs(denominator) <= 1.0e-8:
-                    raise SewingError(f"@TUBE rails cross in the flat pattern of {part.name}.")
-                transverse = (pattern.x - first_x) / denominator
-                if transverse < -0.5 or transverse > 1.5:
-                    raise SewingError(
-                        f"{part.name} extends too far outside its two @TUBE rails at pattern vertex {vertex_index}."
-                    )
-            if on_first or on_second:
-                longitudinal_offset = 0.0
-            parameter_key = round(max(0.0, min(1.0, parameter)), 7)
-            global_index = offsets[part] + vertex_index
-            specifications[global_index] = (
-                parameter_key,
-                transverse,
-                part_index,
-                longitudinal_offset,
-            )
-            tube_indices.append(global_index)
-            section_parameters.add(parameter_key)
-
-    def raw_frame(parameter: float) -> tuple[Vector, Vector, Vector, Vector, tuple[float, float]]:
-        first_point = _curve_value(rails[0].world_nodes, parameter)
-        second_point = _curve_value(rails[1].world_nodes, parameter)
-        center = (first_point + second_point) * 0.5
-        chord_direction = second_point - first_point
-        if chord_direction.length <= 1.0e-8:
-            raise SewingError("The two @TUBE rails coincide before arch construction.")
-        chord_direction.normalize()
-        lower = max(0.0, parameter - 1.0e-3)
-        upper = min(1.0, parameter + 1.0e-3)
-        lower_center = (_curve_value(rails[0].world_nodes, lower) + _curve_value(rails[1].world_nodes, lower)) * 0.5
-        upper_center = (_curve_value(rails[0].world_nodes, upper) + _curve_value(rails[1].world_nodes, upper)) * 0.5
-        axis = upper_center - lower_center
-        axis -= chord_direction * axis.dot(chord_direction)
-        if axis.length <= 1.0e-8:
-            raise SewingError("@TUBE rails do not define a usable longitudinal axis.")
-        axis.normalize()
-        normal = axis.cross(chord_direction)
-        if normal.length <= 1.0e-8:
-            raise SewingError("@TUBE rails do not define a usable arch plane.")
-        normal.normalize()
-        widths = tuple(
-            abs(
-                float(_curve_value(rails[1].pattern_x_nodes[part], parameter))
-                - float(_curve_value(rails[0].pattern_x_nodes[part], parameter))
-            )
-            for part in tube_parts
-        )
-        if min(widths) <= MESH_SPACING_M:
-            raise SewingError("@TUBE rails leave no usable authored panel width.")
-        return center, chord_direction, axis, normal, widths
-
-    midpoint_frame = raw_frame(0.5)
-    base_normal = midpoint_frame[3]
-    frames: dict[float, tuple[Vector, Vector, Vector, Vector, tuple[float, float]]] = {}
-    previous_chord_direction: Vector | None = None
-    for parameter in sorted(section_parameters):
-        center, chord_direction, axis, normal, widths = raw_frame(parameter)
-        if previous_chord_direction is not None and chord_direction.dot(previous_chord_direction) < 0.25:
-            raise SewingError(
-                "@TUBE rail ordering changes along the warp axis; align the two panels in their "
-                "intended front/back placement before Sewing."
-            )
-        previous_chord_direction = chord_direction
-        if normal.dot(base_normal) < 0.0:
-            normal.negate()
-        frames[parameter] = (center, chord_direction, axis, normal, widths)
-
-    first_part = tube_parts[0]
-    first_start = offsets[first_part]
-    first_points = source_positions[first_start : first_start + len(first_part.data.vertices)]
-    first_centroid = Vector((0.0, 0.0, 0.0))
-    for point in first_points:
-        first_centroid += point
-    first_centroid /= len(first_points)
-    direction_value = (first_centroid - body_center).dot(base_normal)
-    if abs(direction_value) <= 1.0e-6:
-        world_normal = Vector((0.0, 0.0, 0.0))
-        normal_matrix = first_part.matrix_world.to_3x3()
-        for polygon in first_part.data.polygons:
-            world_normal += normal_matrix @ polygon.normal
-        direction_value = world_normal.dot(base_normal)
-    signs = (1.0 if direction_value >= 0.0 else -1.0, -1.0 if direction_value >= 0.0 else 1.0)
-
-    maximum_minimum_width = max(min(frame[4]) for frame in frames.values())
-    minimum_radius = maximum_minimum_width / math.pi
-    coarse_count = TUBE_MAX_CANDIDATES - 1 - TUBE_REFINEMENT_STEPS
-    starting_radius = minimum_radius + TUBE_RADIUS_STEP_M * max(0, coarse_count - 1)
-
-    def candidate(radius: float) -> list[Vector]:
-        result = [point.copy() for point in source_positions]
-        sections: dict[
-            tuple[float, int],
-            tuple[Vector, Vector, Vector, Vector, float, float],
-        ] = {}
-        for parameter, (center, chord_direction, axis, normal, widths) in frames.items():
-            minimum_width = min(widths)
-            maximum_width = max(widths)
-            if math.isinf(radius):
-                chord = minimum_width
-            else:
-                reference_angle = min(math.pi * 0.5, minimum_width / (2.0 * radius))
-                chord = 2.0 * radius * math.sin(reference_angle)
-            chord = max(chord, 2.0 * maximum_width / math.pi)
-            if chord > minimum_width * (1.0 + 1.0e-6):
-                raise SewingError(
-                    "The two @TUBE panels differ too much in width to form opposing semicircular arches."
-                )
-            chord = min(chord, minimum_width)
-            for part_index, width in enumerate(widths):
-                angle = _tube_half_angle(width, chord)
-                arc_radius = math.inf if angle <= 1.0e-8 else width / (2.0 * angle)
-                sections[(parameter, part_index)] = (
-                    center,
-                    chord_direction,
-                    axis,
-                    normal,
-                    arc_radius,
-                    angle,
-                )
-        for global_index, (parameter, transverse, part_index, longitudinal_offset) in specifications.items():
-            center, chord_direction, axis, normal, arc_radius, angle = sections[(parameter, part_index)]
-            if math.isinf(arc_radius):
-                width = frames[parameter][4][part_index]
-                across = (transverse - 0.5) * width
-                height = 0.0
-            else:
-                local_angle = (2.0 * transverse - 1.0) * angle
-                across = arc_radius * math.sin(local_angle)
-                height = arc_radius * (math.cos(local_angle) - math.cos(angle))
-            result[global_index] = (
-                center
-                + chord_direction * across
-                + axis * longitudinal_offset
-                + normal * (signs[part_index] * height)
-            )
-        return result
-
-    def body_clearance(positions: list[Vector]) -> float:
-        minimum = math.inf
-        for index in tube_indices:
-            _location, _normal, face_index, distance = bvh.find_nearest(positions[index])
-            if face_index is None or distance is None:
-                continue
-            minimum = min(minimum, float(distance))
-            if minimum <= TUBE_CONTACT_THICKNESS_M:
-                break
-        return minimum
-
-    tested = 1
-    clear_radius = math.inf
-    clear_positions = candidate(clear_radius)
-    clear_distance = body_clearance(clear_positions)
-    if clear_distance <= TUBE_CONTACT_THICKNESS_M:
-        raise SewingError(
-            f"@TUBE flat candidate already touches Body at {clear_distance * 1000.0:.3f} mm; "
-            "move the panels to provide a clear construction bracket."
-        )
-    contact_radius: float | None = None
-    contact_positions: list[Vector] | None = None
-    contact_distance = math.inf
-    for candidate_index in range(coarse_count):
-        radius = starting_radius - candidate_index * TUBE_RADIUS_STEP_M
-        positions = candidate(radius)
-        distance = body_clearance(positions)
-        tested += 1
-        if distance <= TUBE_CONTACT_THICKNESS_M:
-            contact_radius = radius
-            contact_positions = positions
-            contact_distance = distance
-            break
-        clear_radius = radius
-        clear_positions = positions
-        clear_distance = distance
-    if contact_radius is None or contact_positions is None:
-        raise SewingError(
-            f"@TUBE found no Body-contact bracket in {tested} candidates; closest clearance was "
-            f"{clear_distance * 1000.0:.3f} mm. The pre-Sewing state was preserved."
-        )
-    if math.isinf(clear_radius):
-        raise SewingError(
-            "@TUBE reached Body before the first finite 10 mm radius bracket; move the panels farther from Body."
-        )
-
-    upper = clear_radius
-    lower = contact_radius
-    for _iteration in range(TUBE_REFINEMENT_STEPS):
-        radius = 0.5 * (upper + lower)
-        positions = candidate(radius)
-        distance = body_clearance(positions)
-        tested += 1
-        if distance <= TUBE_CONTACT_THICKNESS_M:
-            lower = radius
-            contact_positions = positions
-            contact_distance = distance
-        else:
-            upper = radius
-            clear_positions = positions
-            clear_distance = distance
-    if tested >= 100:
-        raise SewingError("@TUBE internal candidate limit was exceeded.")
-    return clear_positions, upper, tested, clear_distance
-
-
 def create_sewn_mesh(
     context,
     collection: bpy.types.Collection,
-    body: bpy.types.Object | None = None,
 ) -> bpy.types.Object:
     """Merge positioned source parts and add loose sewing-spring edges."""
     if collection is None or collection.get("yohsai_role") != "clothes":
@@ -2080,19 +1521,6 @@ def create_sewn_mesh(
         spring_indices[label].append(len(edges))
         edges.append((a, b))
 
-    (
-        constructed_positions,
-        tube_radius,
-        tube_candidates,
-        tube_body_distance,
-    ) = _tube_construction_positions(
-        context,
-        plan,
-        [Vector(vertex) for vertex in vertices],
-        body,
-    )
-    vertices = [tuple(point) for point in constructed_positions]
-
     name = f"{collection.name}_SEWN"
     mesh = bpy.data.meshes.new(name)
     obj = bpy.data.objects.new(name, mesh)
@@ -2115,11 +1543,6 @@ def create_sewn_mesh(
         obj["yohsai_source_svg"] = str(collection.get("yohsai_source_svg", ""))
         obj["yohsai_sewing_groups"] = labels
         obj["yohsai_source_parts"] = [part.name for part in parts]
-        obj["yohsai_tube_constructed"] = not math.isinf(tube_radius)
-        if not math.isinf(tube_radius):
-            obj["yohsai_tube_effective_radius_m"] = tube_radius
-            obj["yohsai_tube_candidate_count"] = tube_candidates
-            obj["yohsai_tube_body_distance_m"] = tube_body_distance
         collection["yohsai_sewing_verified"] = True
 
         for selected in context.selected_objects:

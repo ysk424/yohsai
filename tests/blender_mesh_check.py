@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 import bpy  # noqa: E402
+import numpy as np  # noqa: E402
 from mathutils import Vector  # noqa: E402
 
 installed_check = os.environ.get("YOHSAI_INSTALLED_CHECK") == "1"
@@ -58,7 +59,8 @@ try:
     parts = sorted(collection.objects, key=lambda item: item.name)
     assert [obj.name for obj in parts] == ["CLOTHES_001_PART_001", "CLOTHES_001_PART_002"]
     if svg_path.suffix.lower() == ".pdf":
-        assert [obj["yohsai_panel_label"] for obj in parts] == ["OMOTE", "URA"]
+        labels = [obj["yohsai_panel_label"] for obj in parts]
+        assert labels[0].startswith("OMOTE") and labels[1].startswith("URA"), labels
     assert all(obj.type == "MESH" and obj.get("yohsai_role") == "part" for obj in parts)
     assert all(len(obj.modifiers) == 0 for obj in parts)
     assert sum(len(obj.data.vertices) for obj in parts) > 100
@@ -152,8 +154,55 @@ try:
     kitsuke_result = bpy.ops.yohsai.kitsuke()
     assert kitsuke_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
     session = kitsuke_module._sessions[collection.as_pointer()]
-    assert session.runtime.quad_count == len(session.quads) > 0
-    assert len(session.edges) < len(session.all_edges)
+    assert session.runtime.seam_count == len(spring_pairs) > 0
+    assert not hasattr(session, "edge_rest")
+    assert len(session.topology.edges) > 0
+    assert len(session.topology.quads) > 0
+    assert len(session.topology.bends) > 0
+    np.testing.assert_array_equal(session.runtime.seam_state(), 0.0)
+    material_lengths = np.linalg.norm(
+        session.positions[session.topology.edges[:, 1]]
+        - session.positions[session.topology.edges[:, 0]],
+        axis=1,
+    )
+    material_ratios = material_lengths / session.topology.edge_rest_lengths
+    material_p99 = float(np.quantile(material_ratios, 0.99))
+    material_max = float(material_ratios.max())
+    material_excess_max = float(
+        np.max(np.maximum(0.0, material_lengths - session.topology.edge_rest_lengths))
+    )
+    worst_edge = int(np.argmax(material_ratios))
+    worst_vertices = session.topology.edges[worst_edge]
+    seam_vertices = set(int(value) for value in session.seams.ravel())
+    seam_edge_mask = np.asarray(
+        [
+            int(edge[0]) in seam_vertices or int(edge[1]) in seam_vertices
+            for edge in session.topology.edges
+        ],
+        dtype=bool,
+    )
+    seam_edge_excess_max = float(
+        np.max(
+            np.maximum(
+                0.0,
+                material_lengths[seam_edge_mask]
+                - session.topology.edge_rest_lengths[seam_edge_mask],
+            )
+        )
+    )
+    worst_detail = (
+        material_p99,
+        material_max,
+        float(session.topology.edge_rest_lengths[worst_edge]),
+        float(material_lengths[worst_edge]),
+        material_excess_max,
+        seam_edge_excess_max,
+        tuple(int(value) for value in worst_vertices),
+        tuple(int(value) in seam_vertices for value in worst_vertices),
+    )
+    assert material_p99 < 1.5, worst_detail
+    assert material_excess_max < 0.01, worst_detail
+    assert seam_edge_excess_max < 0.005, worst_detail
     assert not any(obj.get("yohsai_role") == "sewn" for obj in collection.objects)
     assert all(not obj.hide_get() and not obj.hide_render for obj in parts)
     after = [
@@ -166,13 +215,19 @@ try:
 
 # Object-mode placement between clicks is accepted while the live simulation
 # retains exact sewing pairs without a persistent combined preview mesh.
+    assert abs(bpy.context.scene.yohsai.kitsuke_gravity - 1.0) < 1.0e-7
     parts[0].location.x += 0.01
     parts[0].rotation_euler.z += 0.02
+    bpy.context.scene.yohsai.kitsuke_gravity = 10.0
     second_kitsuke = bpy.ops.yohsai.kitsuke()
     assert second_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
-    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_gravity")
+    assert "gravity -Z 10" in bpy.context.scene.yohsai.parse_status
     assert not hasattr(bpy.context.scene.yohsai, "kitsuke_seam_pull_mm")
-    for _step in range(8):
+    bpy.context.scene.yohsai.kitsuke_gravity = 0.0
+    assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+    assert "gravity -Z 0" in bpy.context.scene.yohsai.parse_status
+    bpy.context.scene.yohsai.kitsuke_gravity = 10.0
+    for _step in range(7):
         repeated_kitsuke = bpy.ops.yohsai.kitsuke()
         assert repeated_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
     repeated_positions = [
@@ -236,7 +291,9 @@ try:
         assert all("yohsai_pattern_position" in obj.data.attributes for obj in update_parts)
         assert bpy.ops.yohsai.sewing() == {"FINISHED"}
         assert bool(update_collection["yohsai_sewing_verified"])
+        bpy.context.scene.yohsai.kitsuke_gravity = 0.0
         assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+        assert "gravity -Z 0" in bpy.context.scene.yohsai.parse_status
         object_pointers = [obj.as_pointer() for obj in update_parts]
         old_vertex_counts = [len(obj.data.vertices) for obj in update_parts]
         old_matrices = [obj.matrix_world.copy() for obj in update_parts]
@@ -256,7 +313,9 @@ try:
         assert [len(obj.data.vertices) for obj in update_parts] != old_vertex_counts
         assert bool(update_collection["yohsai_sewing_verified"])
         assert not any(obj.get("yohsai_role") == "sewn" for obj in update_collection.objects)
+        bpy.context.scene.yohsai.kitsuke_gravity = 10.0
         assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+        assert "gravity -Z 10" in bpy.context.scene.yohsai.parse_status
 
         changed_sewing_svg = larger_svg.replace(">A</text>", ">B</text>")
         update_path.write_text(changed_sewing_svg, encoding="utf-8")

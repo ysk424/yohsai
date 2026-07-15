@@ -12,17 +12,16 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .kitsuke import (
     DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
     DEFAULT_KITSUKE_BACKEND,
-    DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
     KitsukeError,
     LOCKED_OBJECT_KEY,
     KITSUKE_BACKEND_STABLE_COSSERAT,
-    KITSUKE_BACKEND_TAICHI_PBD,
+    KITSUKE_BACKEND_TAICHI,
     MAX_SOLVER_ITERATIONS,
     MIN_SOLVER_ITERATIONS,
     SOLVER_ITERATIONS,
@@ -284,25 +283,33 @@ class YohsaiProperties(PropertyGroup):
         items=(
             (
                 KITSUKE_BACKEND_STABLE_COSSERAT,
-                "Stable Cosserat",
-                "Native CPU rod-graph solver with split position and material-frame updates",
+                "Square-Lattice Cloth",
+                "Native CPU cloth with warp/weft stretch, quad shear, light bending, constant-force seams, and Body contact",
             ),
             (
-                KITSUKE_BACKEND_TAICHI_PBD,
-                "Legacy Taichi PBD",
-                "Original Yohsai distance-constraint solver for comparison and recovery",
+                KITSUKE_BACKEND_TAICHI,
+                "Taichi Cloth",
+                "Taichi implementation of the same constant-force square-lattice material model",
             ),
         ),
         default=DEFAULT_KITSUKE_BACKEND,
     )
     kitsuke_iterations: IntProperty(
-        name="Iterations",
-        description="Kitsuke constraint iterations per substep. Lower this on slow PCs; raise it to reduce cloth stretch.",
+        name="Solver Iterations",
+        description="Material and Body-contact iterations per substep",
         default=SOLVER_ITERATIONS,
         min=MIN_SOLVER_ITERATIONS,
         max=MAX_SOLVER_ITERATIONS,
         soft_min=4,
         soft_max=64,
+    )
+    kitsuke_gravity: FloatProperty(
+        name="Gravity (-Z m/s²)",
+        description="Downward acceleration used by the next Kitsuke click; zero disables gravity",
+        default=DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
+        min=0.0,
+        soft_max=10.0,
+        precision=2,
     )
 
 
@@ -433,7 +440,7 @@ class YOHSAI_OT_update_svg(Operator):
 class YOHSAI_OT_sewing(Operator):
     bl_idname = "yohsai.sewing"
     bl_label = "Sewing"
-    bl_description = "Verify ordered sewing edges and build any annotated construction preview"
+    bl_description = "Verify ordered sewing edges and build a connectivity preview"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -445,18 +452,13 @@ class YOHSAI_OT_sewing(Operator):
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
         try:
-            sewn_object = create_sewn_mesh(context, collection, props.body_object)
+            sewn_object = create_sewn_mesh(context, collection)
         except Exception as exc:
             message = str(exc).strip() or type(exc).__name__
             props.parse_status = f"Sewing failed: {message[:240]}"
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
-        if bool(sewn_object.get("yohsai_tube_constructed", False)):
-            radius_mm = float(sewn_object.get("yohsai_tube_effective_radius_m", 0.0)) * 1000.0
-            candidates = int(sewn_object.get("yohsai_tube_candidate_count", 0))
-            message = f"Sewn {sewn_object.name}: @TUBE radius {radius_mm:.3g} mm in {candidates} candidates"
-        else:
-            message = f"Sewn {sewn_object.name}"
+        message = f"Sewn {sewn_object.name}"
         props.parse_status = message
         self.report({"INFO"}, message)
         return {"FINISHED"}
@@ -479,8 +481,7 @@ class YOHSAI_OT_kitsuke(Operator):
                 context,
                 props.clothes_collection,
                 props.body_object,
-                DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
-                DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
+                props.kitsuke_gravity,
                 props.kitsuke_iterations,
                 props.kitsuke_backend,
             )
@@ -521,6 +522,7 @@ class YOHSAI_PT_main(Panel):
         lock_row.operator(YOHSAI_OT_lock_auto.bl_idname, text="Auto")
         inputs.prop(props, "kitsuke_backend")
         inputs.prop(props, "kitsuke_iterations")
+        inputs.prop(props, "kitsuke_gravity")
         layout.separator(factor=0.4)
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")

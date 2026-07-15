@@ -1,158 +1,71 @@
-# Stable Cosserat Kitsuke Design
+# Native Kitsuke Solver Design
 
-Status: historical v0.4 triangular baseline; superseded in this repository by
-the v0.5 grainline mapping in `GRAINLINE_DESIGN.md`
-Recorded: 2026-07-14 (Asia/Tokyo)
+Status: current native runtime contract
 
-## 1. Scope
+The DLL name retains `cosserat` for package compatibility. The active runtime is
+a Body-independent square-lattice cloth solver with a version-7 C ABI.
 
-This repository preserves Yohsai's pattern-authoritative workflow and replaces
-only the transient Kitsuke physics backend. `Load`, `Update`, `Sewing`, manual
-Object Mode placement, Lock, Undo/Redo, and the separate persistent panel
-objects remain product invariants.
+## State and topology
 
-This document records the validated `yohsai-cosserat` v0.4 baseline. Version
-0.5.2 retains its Stable Cosserat position/orientation solve and contact rules,
-but replaces the graph construction described below with warp/weft structural
-edges, proxy diagonals, and explicit quad shear/area response. Read
-`GRAINLINE_DESIGN.md` and `FABRIC_EXTENSION_DESIGN.md` for current behavior.
+The runtime stores particle position, previous position, velocity, inverse mass,
+and Lock state. The creation descriptor also contains:
 
-Stable Cosserat Rods is a one-dimensional rod method, not a triangular shell
-method. The first implementation therefore uses a hybrid graph construction
-instead of claiming a direct shell formulation:
+- constant-magnitude seam attraction with zero-length capture;
+- non-proxy material edges and their authored rest lengths;
+- ordered square cells and the authored 2D metric of each cell;
+- straight warp/weft triples and their two segment lengths;
+- a fixed Body triangle snapshot used only for collision.
 
-- every existing panel mesh edge becomes one directed Cosserat segment;
-- near-collinear incident edges in authoritative pattern space are paired into
-  rod chains;
-- all three edges of every triangle retain the in-plane metric;
-- Stable Cosserat orientation relaxation supplies directional bend and twist;
-- existing seam pairs remain progressive maximum-distance constraints;
-- Body contact uses capped continuation and self-contact uses interior
-  point-triangle normal projection; both retain Yohsai's Python broad phase.
+All material rest data comes from the loaded pattern. Body vertices, Body
+normals, bones, and the current Body silhouette never define cloth rest data.
 
-This produced the three-direction rod network on the v0.4 near-equilateral
-triangulation. The v0.5 fork implemented the planned warp/weft remeshing and
-bumped the native API to version 2.
+## Material energy
 
-## 2. Numerical state
+Warp, weft, and boundary-transition edges preserve their authored lengths. For
+an ordered quad `(x0, x1, x2, x3)`, the averaged material spans are
 
-The native state contains:
+```
+u = ((x1 - x0) + (x2 - x3)) / 2
+v = ((x3 - x0) + (x2 - x1)) / 2
+```
 
-- vertex positions `x`, velocities `v`, and locked flags;
-- one unit quaternion `q` for every mesh edge;
-- rest edge lengths from `yohsai_pattern_edge_rest`;
-- rest relative quaternions for automatically paired segments;
-- progressive seam maximum distances;
-- the fixed Body triangle snapshot already used by a Kitsuke session.
+The shear term reduces `dot(u, v) - rest_uv`. Edge lengths supply the two axial
+metric terms, so the triangulation diagonal is only a rendering proxy and does
+not become an artificial spring.
 
-One substep predicts inertial positions and alternates capped contact/seam
-projection with local VBD position updates and the Stable Cosserat closed-form
-orientation update. It finishes with material-only relaxation so a local
-projection is distributed through the rod graph before export. Contact impulses
-also move the inertial prediction target, preventing the following VBD sweep
-from simply cancelling a valid collision response. Velocity is reconstructed
-from the accepted position change and bounded before persistence.
+For each collinear warp/weft triple `(a, b, c)`, the weak bending term reduces
 
-The approximate Stable Cosserat multiplier is used first:
+```
+(xa - xb) / rest_ab + (xc - xb) / rest_bc
+```
 
-`lambda = |v| + |b|`.
+This expression is zero for a straight material row under any rigid transform.
+It contains no preferred Body-shaped arch.
 
-The exact multiplier refinement remains a future option because the paper and
-reference implementation report that the approximation is normally sufficient.
+## Substep
 
-## 3. Rod graph construction
+Each substep performs:
 
-For each mesh vertex, incident segment directions are evaluated in rest-frame
-space. Two segments form a continuation only when they are each other's most
-opposite incident direction and their deviation from a straight line is below
-the configured threshold. Consequently each segment has at most one
-continuation at either endpoint, while intersections and irregular boundaries
-remain valid graph junctions.
+1. a distance-independent seam impulse for every uncaptured pair;
+2. velocity/position prediction from existing velocity and gravity;
+3. seam-capture detection, then iterative captured-seam, quad-shear,
+   axial-bend, and two-way edge sweeps;
+4. Body contact correction for supplied candidates;
+5. velocity reconstruction from the accepted position change.
 
-Flat panels use `yohsai_pattern_position` as rest-frame geometry. RING panels
-use `yohsai_construction_position` for director initialization while retaining
-the authoritative pattern edge lengths for stretch.
+Forward and reverse edge sweeps alternate to reduce ordering bias. Every local
+correction is mass weighted and bounded. Uncaptured seam-force magnitude is
+independent of pair distance. At 2 mm or after endpoint crossing, the pair is
+captured at zero distance. There is no seam-target shortening, Body attraction,
+shape matching, self-contact, or speed clamp.
 
-## 4. Blender/native boundary
+Each substep ends with extra alternating material-edge and captured-seam sweeps.
+Their purpose is to distribute the strong stitch load into the cloth instead of
+allowing a seam vertex to stretch one neighboring edge into a tear-like spike.
 
-The native library exposes a versioned C ABI and is loaded with `ctypes`. This
-avoids binding the binary to Blender's exact CPython patch release. NumPy arrays
-cross the boundary in bulk; no per-vertex Python calls occur inside a substep.
+## Safety
 
-If the native DLL is absent or incompatible, Yohsai reports an actionable
-error. The established Taichi PBD backend remains selectable during the
-comparison phase.
-
-World-space segment quaternions are persisted as edge-domain Blender
-attributes. This makes Undo/Redo restoration deterministic. When the user
-rotates a panel between clicks, the runtime rebuilds its geometric frames before
-the next solve; translations do not alter their physical direction.
-
-## 5. Contact boundary
-
-The first milestone preserves the current candidate boundary: Body and
-self-contact candidate pairs are generated by Blender/Python and sent to the
-native solver in bulk. Deep Body vertices are included even when farther than
-the normal nearby-search radius. Their correction is capped to 0.5 mm per
-inner pass and continued over clicks. Self-contact applies only when a vertex's
-normal projection is strictly inside a non-excluded triangle, which avoids
-false in-plane repulsion between nearby coplanar triangles. This is not claimed
-to be CCD or intersection-free IPC; edge-edge contact is not implemented yet.
-
-After the material solver is validated, contact is upgraded independently:
-
-1. refresh candidates during the nonlinear iteration;
-2. add swept broad phase and conservative advancement;
-3. replace projection with a thickness-aware barrier;
-4. preserve the explicit Yohsai product rule that seam closure has priority in
-   designated seam neighborhoods.
-
-The last rule means a globally intersection-free solution cannot be promised
-for an undersized garment. That behavior is intentional and must not be hidden
-behind an IPC claim.
-
-## 6. Acceptance status
-
-The native backend is the v0.4 default after passing:
-
-1. C ABI validation, quaternion norm, zero-strain, rigid-transform, gravity,
-   lock, seam, deep-Body continuation, and false-self-contact native tests;
-2. ctypes bridge state, orientation, seam, and unlock tests;
-3. repeated Kitsuke clicks on the real `test2.pdf` Blender fixture, including
-   manual Object Mode placement and monotone aggregate seam reduction;
-4. mirrored RING sleeve construction from `test3.pdf`;
-5. Undo/Redo reconstruction with persisted velocities, seam targets, backend,
-   and orientations (the v0.4.1 high-density replay is exactly identical);
-6. topology Update, sewing-signature invalidation, and required re-Sewing.
-7. the v0.4.1 5 mm density fixture: 19,454 vertices, 38,030 triangles,
-   448 sewing constraints, and ten Stable Cosserat clicks without rollback.
-
-A recorded side-by-side visual/material comparison with Legacy Taichi remains
-a release-quality task, not a numerical correctness gate. GPU work begins only
-after the CPU implementation is used as a trusted oracle on additional garment
-fixtures.
-
-## 7. First owner acceptance
-
-On 2026-07-14, after testing the installed v0.4.0 build in the intended
-interactive dressing workflow, the project owner reported:
-
-- no visible Body penetration in the tested dressing sequence;
-- CPU performance was already practical and did not feel slow;
-- among the project's XPBD, finite-element, and Stable Cosserat prototypes,
-  this backend was the closest to the intended Kitsuke behavior.
-
-The owner also reported that implementation completed in materially less time
-and with fewer model tokens than initially expected. These are qualitative
-acceptance observations, not a timed benchmark, strain study, or guarantee of
-global non-penetration. The automated acceptance gates above remain the
-reproducible record.
-
-## 8. Licensing
-
-The complete Yohsai extension remains GPL-3.0-or-later. The Stable Cosserat
-algorithm is implemented from the published paper and checked against the
-authors' MIT-licensed CPU reference implementation. Copyright and attribution
-notices must be retained for any reference source later copied into this tree.
-The GPL license guarantees that independent users can run, study, modify, and
-redistribute the extension without a fee.
+Inputs and committed state must be finite. Invalid topology and indices are
+rejected. The Blender layer rolls back a click only if state becomes non-finite;
+finite particle movement has no rollback threshold. Body triangles remain
+collision input only.

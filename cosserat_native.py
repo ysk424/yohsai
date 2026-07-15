@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""ctypes bridge for the versioned Stable Cosserat native solver C ABI."""
+"""ctypes bridge for the versioned native square-lattice cloth solver."""
 
 from __future__ import annotations
 
@@ -10,14 +10,12 @@ from pathlib import Path
 import numpy as np
 
 
-API_VERSION = 4
-INTERNAL_SELF_COLLISION = -1
-INEXTENSIBLE_EXTENSION_COMPLIANCE = 0.0
+API_VERSION = 7
 _ERROR_CAPACITY = 1024
 
 
 class NativeCosseratError(RuntimeError):
-    """The native Stable Cosserat backend cannot be loaded or advanced."""
+    """The packaged native Kitsuke runtime cannot be loaded or advanced."""
 
 
 FloatPointer = ctypes.POINTER(ctypes.c_float)
@@ -29,15 +27,11 @@ class _Config(ctypes.Structure):
         ("time_step", ctypes.c_float),
         ("substeps", ctypes.c_int32),
         ("iterations", ctypes.c_int32),
-        ("director_alignment_stiffness", ctypes.c_float),
-        ("extension_compliance", ctypes.c_float),
-        ("bend_stiffness", ctypes.c_float),
-        ("quad_shear_stiffness", ctypes.c_float),
-        ("quad_area_stiffness", ctypes.c_float),
-        ("straight_pair_cosine", ctypes.c_float),
-        ("seam_projection_passes", ctypes.c_int32),
-        ("velocity_damping_per_second", ctypes.c_float),
-        ("maximum_speed", ctypes.c_float),
+        ("seam_attraction_force", ctypes.c_float),
+        ("seam_capture_distance", ctypes.c_float),
+        ("stretch_relaxation", ctypes.c_float),
+        ("shear_relaxation", ctypes.c_float),
+        ("bend_relaxation", ctypes.c_float),
         ("maximum_position_correction", ctypes.c_float),
         ("contact_thickness", ctypes.c_float),
     ]
@@ -48,21 +42,19 @@ class _CreateDesc(ctypes.Structure):
         ("vertex_count", ctypes.c_int32),
         ("positions", FloatPointer),
         ("velocities", FloatPointer),
-        ("rest_frame_positions", FloatPointer),
-        ("material_rest_positions", FloatPointer),
         ("inverse_masses", FloatPointer),
         ("locked", IntPointer),
+        ("seam_count", ctypes.c_int32),
+        ("seams", IntPointer),
         ("edge_count", ctypes.c_int32),
         ("edges", IntPointer),
         ("edge_rest_lengths", FloatPointer),
         ("quad_count", ctypes.c_int32),
         ("quads", IntPointer),
-        ("seam_count", ctypes.c_int32),
-        ("seams", IntPointer),
-        ("face_count", ctypes.c_int32),
-        ("faces", IntPointer),
-        ("collision_edge_count", ctypes.c_int32),
-        ("collision_edges", IntPointer),
+        ("quad_rest_metrics", FloatPointer),
+        ("bend_count", ctypes.c_int32),
+        ("bends", IntPointer),
+        ("bend_rest_lengths", FloatPointer),
         ("body_vertex_count", ctypes.c_int32),
         ("body_positions", FloatPointer),
         ("body_face_count", ctypes.c_int32),
@@ -73,12 +65,9 @@ class _CreateDesc(ctypes.Structure):
 class _AdvanceDesc(ctypes.Structure):
     _fields_ = [
         ("gravity", ctypes.c_float * 3),
-        ("seam_closure", ctypes.c_float),
         ("iterations", ctypes.c_int32),
         ("body_candidate_count", ctypes.c_int32),
         ("body_candidates", IntPointer),
-        ("self_candidate_count", ctypes.c_int32),
-        ("self_candidates", IntPointer),
     ]
 
 
@@ -86,19 +75,13 @@ class _Stats(ctypes.Structure):
     _fields_ = [
         ("substeps", ctypes.c_int32),
         ("iterations", ctypes.c_int32),
-        ("segment_count", ctypes.c_int32),
-        ("angle_count", ctypes.c_int32),
+        ("seam_count", ctypes.c_int32),
+        ("captured_seam_count", ctypes.c_int32),
+        ("edge_count", ctypes.c_int32),
         ("quad_count", ctypes.c_int32),
+        ("bend_count", ctypes.c_int32),
         ("body_candidate_count", ctypes.c_int32),
-        ("self_candidate_count", ctypes.c_int32),
-        ("self_broad_phase_rebuilds", ctypes.c_int32),
-        ("self_candidate_tests", ctypes.c_int64),
         ("maximum_displacement", ctypes.c_float),
-        ("maximum_edge_strain", ctypes.c_float),
-        ("stretch_energy", ctypes.c_float),
-        ("bend_energy", ctypes.c_float),
-        ("shear_energy", ctypes.c_float),
-        ("area_energy", ctypes.c_float),
     ]
 
 
@@ -115,8 +98,7 @@ def _int_array(values, columns: int, name: str) -> np.ndarray:
     result = np.ascontiguousarray(values, dtype=np.int32)
     if result.size == 0:
         return np.empty((0, columns), dtype=np.int32)
-    expected = (len(result), columns)
-    if result.shape != expected:
+    if result.ndim != 2 or result.shape[1] != columns:
         raise NativeCosseratError(f"{name} must be an int32 array with shape (N, {columns}).")
     return result
 
@@ -127,15 +109,6 @@ def _float_pointer(values: np.ndarray) -> FloatPointer:
 
 def _int_pointer(values: np.ndarray) -> IntPointer:
     return values.ctypes.data_as(IntPointer)
-
-
-def _candidate_array(values, name: str) -> np.ndarray:
-    result = np.ascontiguousarray(values, dtype=np.int32)
-    if result.size == 0:
-        return np.empty((0, 2), dtype=np.int32)
-    if result.ndim != 2 or result.shape[1] != 2:
-        raise NativeCosseratError(f"{name} must have shape (N, 2).")
-    return result
 
 
 def _library_candidates() -> tuple[Path, ...]:
@@ -152,29 +125,6 @@ def _library_candidates() -> tuple[Path, ...]:
         )
     )
     return tuple(candidates)
-
-
-def _load_library() -> ctypes.CDLL:
-    attempted: list[str] = []
-    for path in _library_candidates():
-        attempted.append(str(path))
-        if not path.is_file():
-            continue
-        try:
-            library = ctypes.CDLL(str(path))
-        except OSError as exc:
-            raise NativeCosseratError(f"Cannot load Stable Cosserat library {path}: {exc}") from exc
-        _configure_library(library)
-        version = int(library.ysc_get_api_version())
-        if version != API_VERSION:
-            raise NativeCosseratError(
-                f"Stable Cosserat library API {version} does not match the Yohsai API {API_VERSION}."
-            )
-        return library
-    raise NativeCosseratError(
-        "Stable Cosserat native library was not found. Build it with build_native.ps1. "
-        f"Searched: {', '.join(attempted)}"
-    )
 
 
 def _configure_library(library: ctypes.CDLL) -> None:
@@ -196,9 +146,6 @@ def _configure_library(library: ctypes.CDLL) -> None:
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32),
-        ctypes.POINTER(ctypes.c_int32),
-        ctypes.POINTER(ctypes.c_int32),
-        ctypes.POINTER(ctypes.c_int32),
         ctypes.c_char_p,
         ctypes.c_int32,
     ]
@@ -208,7 +155,6 @@ def _configure_library(library: ctypes.CDLL) -> None:
         FloatPointer,
         FloatPointer,
         IntPointer,
-        ctypes.c_int32,
         ctypes.c_char_p,
         ctypes.c_int32,
     ]
@@ -221,10 +167,6 @@ def _configure_library(library: ctypes.CDLL) -> None:
         ctypes.c_int32,
     ]
     library.ysc_copy_state.restype = ctypes.c_int32
-    for name in ("ysc_replace_orientations", "ysc_copy_orientations"):
-        function = getattr(library, name)
-        function.argtypes = [ctypes.c_void_p, FloatPointer, ctypes.c_char_p, ctypes.c_int32]
-        function.restype = ctypes.c_int32
     for name in ("ysc_replace_seam_state", "ysc_copy_seam_state"):
         function = getattr(library, name)
         function.argtypes = [ctypes.c_void_p, FloatPointer, ctypes.c_char_p, ctypes.c_int32]
@@ -242,13 +184,27 @@ def _configure_library(library: ctypes.CDLL) -> None:
 _library: ctypes.CDLL | None = None
 
 
-def native_library_available() -> bool:
-    """Return whether a compatible DLL can be loaded without creating a simulation."""
-    try:
-        _get_library()
-        return True
-    except NativeCosseratError:
-        return False
+def _load_library() -> ctypes.CDLL:
+    attempted: list[str] = []
+    for path in _library_candidates():
+        attempted.append(str(path))
+        if not path.is_file():
+            continue
+        try:
+            library = ctypes.CDLL(str(path))
+        except OSError as exc:
+            raise NativeCosseratError(f"Cannot load native Kitsuke library {path}: {exc}") from exc
+        _configure_library(library)
+        version = int(library.ysc_get_api_version())
+        if version != API_VERSION:
+            raise NativeCosseratError(
+                f"Native Kitsuke API {version} does not match the extension API {API_VERSION}."
+            )
+        return library
+    raise NativeCosseratError(
+        "Native Kitsuke library was not found. Build it with build_native.ps1. "
+        f"Searched: {', '.join(attempted)}"
+    )
 
 
 def _get_library() -> ctypes.CDLL:
@@ -258,45 +214,38 @@ def _get_library() -> ctypes.CDLL:
     return _library
 
 
-class NativeCosseratRuntime:
-    """Own one native solver handle and expose the existing Kitsuke runtime contract."""
+def native_library_available() -> bool:
+    try:
+        _get_library()
+        return True
+    except NativeCosseratError:
+        return False
 
-    def __init__(
-        self,
-        positions,
-        velocities,
-        rest_frame_positions,
-        material_rest_positions,
-        edges,
-        edge_rest,
-        quads,
-        seams,
-        faces,
-        collision_edges,
-        body,
-        locked,
-        *,
-        extension_compliance: float = INEXTENSIBLE_EXTENSION_COMPLIANCE,
-    ):
+
+class NativeCosseratRuntime:
+    """Own one native cloth solver and expose Kitsuke state operations."""
+
+    def __init__(self, positions, velocities, seams, topology, body, locked):
         self._library = _get_library()
         self._handle = ctypes.c_void_p()
         self.vertex_count = int(len(positions))
-        self.segment_count = int(len(edges))
-        self.quad_count = int(len(quads))
         self.seam_count = int(len(seams))
 
         positions_array = _float_array(positions, (self.vertex_count, 3), "positions")
         velocities_array = _float_array(velocities, (self.vertex_count, 3), "velocities")
-        rest_array = _float_array(rest_frame_positions, (self.vertex_count, 3), "rest frame positions")
-        material_rest_array = _float_array(
-            material_rest_positions, (self.vertex_count, 3), "material rest positions"
-        )
-        edges_array = _int_array(edges, 2, "edges")
-        edge_rest_array = _float_array(edge_rest, (self.segment_count,), "edge rest lengths")
-        quads_array = _int_array(quads, 4, "quads")
         seams_array = _int_array(seams, 2, "seams")
-        faces_array = _int_array(faces, 3, "faces")
-        collision_edges_array = _int_array(collision_edges, 2, "collision edges")
+        edges = _int_array(topology.edges, 2, "material edges")
+        edge_rest_lengths = _float_array(
+            topology.edge_rest_lengths, (len(edges),), "material edge rest lengths"
+        )
+        quads = _int_array(topology.quads, 4, "material quads")
+        quad_rest_metrics = _float_array(
+            topology.quad_rest_metrics, (len(quads), 3), "material quad rest metrics"
+        )
+        bends = _int_array(topology.bends, 3, "material bends")
+        bend_rest_lengths = _float_array(
+            topology.bend_rest_lengths, (len(bends), 2), "material bend rest lengths"
+        )
         body_vertices = _float_array(body.vertices, (len(body.vertices), 3), "Body vertices")
         body_faces = _int_array(body.faces, 3, "Body faces")
         locked_array = np.ascontiguousarray(locked, dtype=np.int32)
@@ -307,27 +256,24 @@ class NativeCosseratRuntime:
         config = _Config()
         if self._library.ysc_default_config(ctypes.byref(config)) != 0:
             raise NativeCosseratError("Native solver did not provide a default configuration.")
-        config.extension_compliance = float(extension_compliance)
 
         desc = _CreateDesc(
             self.vertex_count,
             _float_pointer(positions_array),
             _float_pointer(velocities_array),
-            _float_pointer(rest_array),
-            _float_pointer(material_rest_array),
             _float_pointer(inverse_masses),
             _int_pointer(locked_array),
-            self.segment_count,
-            _int_pointer(edges_array),
-            _float_pointer(edge_rest_array),
-            self.quad_count,
-            _int_pointer(quads_array),
             self.seam_count,
             _int_pointer(seams_array),
-            len(faces_array),
-            _int_pointer(faces_array),
-            len(collision_edges_array),
-            _int_pointer(collision_edges_array),
+            len(edges),
+            _int_pointer(edges),
+            _float_pointer(edge_rest_lengths),
+            len(quads),
+            _int_pointer(quads),
+            _float_pointer(quad_rest_metrics),
+            len(bends),
+            _int_pointer(bends),
+            _float_pointer(bend_rest_lengths),
             len(body_vertices),
             _float_pointer(body_vertices),
             len(body_faces),
@@ -338,33 +284,21 @@ class NativeCosseratRuntime:
             raise NativeCosseratError("Native solver returned no handle.")
 
         vertex_count = ctypes.c_int32()
-        segment_count = ctypes.c_int32()
-        angle_count = ctypes.c_int32()
-        quad_count = ctypes.c_int32()
         seam_count = ctypes.c_int32()
         self._call(
             "ysc_get_counts",
             self._handle,
             ctypes.byref(vertex_count),
-            ctypes.byref(segment_count),
-            ctypes.byref(angle_count),
-            ctypes.byref(quad_count),
             ctypes.byref(seam_count),
         )
-        if (
-            vertex_count.value != self.vertex_count
-            or segment_count.value != self.segment_count
-            or quad_count.value != self.quad_count
-            or seam_count.value != self.seam_count
-        ):
+        if vertex_count.value != self.vertex_count or seam_count.value != self.seam_count:
             self.close()
             raise NativeCosseratError("Native solver count validation failed.")
-        self.angle_count = int(angle_count.value)
         self.last_stats: dict[str, float | int] = {}
 
     def _call(self, function_name: str, *arguments) -> None:
         if function_name != "ysc_create" and not self._handle:
-            raise NativeCosseratError("Stable Cosserat runtime is closed.")
+            raise NativeCosseratError("Native Kitsuke runtime is closed.")
         error = ctypes.create_string_buffer(_ERROR_CAPACITY)
         status = int(getattr(self._library, function_name)(*arguments, error, _ERROR_CAPACITY))
         if status != 0:
@@ -382,7 +316,7 @@ class NativeCosseratRuntime:
         except Exception:
             pass
 
-    def replace_state(self, positions, velocities, locked, *, reinitialize_orientations: bool = True) -> None:
+    def replace_state(self, positions, velocities, locked) -> None:
         positions_array = _float_array(positions, (self.vertex_count, 3), "positions")
         velocities_array = _float_array(velocities, (self.vertex_count, 3), "velocities")
         locked_array = np.ascontiguousarray(locked, dtype=np.int32)
@@ -394,7 +328,6 @@ class NativeCosseratRuntime:
             _float_pointer(positions_array),
             _float_pointer(velocities_array),
             _int_pointer(locked_array),
-            1 if reinitialize_orientations else 0,
         )
 
     def state(self) -> tuple[np.ndarray, np.ndarray]:
@@ -408,15 +341,6 @@ class NativeCosseratRuntime:
         )
         return positions, velocities
 
-    def orientation_state(self) -> np.ndarray:
-        orientations = np.empty((self.segment_count, 4), dtype=np.float32)
-        self._call("ysc_copy_orientations", self._handle, _float_pointer(orientations))
-        return orientations
-
-    def replace_orientation_state(self, orientations) -> None:
-        values = _float_array(orientations, (self.segment_count, 4), "orientations")
-        self._call("ysc_replace_orientations", self._handle, _float_pointer(values))
-
     def seam_state(self) -> np.ndarray:
         values = np.empty(self.seam_count, dtype=np.float32)
         self._call("ysc_copy_seam_state", self._handle, _float_pointer(values))
@@ -429,26 +353,15 @@ class NativeCosseratRuntime:
     def advance(
         self,
         body_candidates,
-        self_candidates,
         gravity_magnitude: float,
-        seam_closure: float,
         solver_iterations: int,
     ) -> None:
-        body = _candidate_array(body_candidates, "Body candidates")
-        internal_self_collision = self_candidates is None
-        self_contact = (
-            np.empty((0, 2), dtype=np.int32)
-            if internal_self_collision
-            else _candidate_array(self_candidates, "self-contact candidates")
-        )
+        body = _int_array(body_candidates, 2, "Body candidates")
         desc = _AdvanceDesc(
             (ctypes.c_float * 3)(0.0, 0.0, -float(gravity_magnitude)),
-            float(seam_closure),
             int(solver_iterations),
             len(body),
             _int_pointer(body),
-            INTERNAL_SELF_COLLISION if internal_self_collision else len(self_contact),
-            _int_pointer(self_contact),
         )
         stats = _Stats()
         self._call("ysc_advance", self._handle, ctypes.byref(desc), ctypes.byref(stats))

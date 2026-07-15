@@ -17,8 +17,7 @@
 extern "C" {
 #endif
 
-#define YSC_API_VERSION 4
-#define YSC_INTERNAL_SELF_COLLISION (-1)
+#define YSC_API_VERSION 7
 
 typedef void* ysc_handle;
 
@@ -34,17 +33,13 @@ typedef struct ysc_config {
     float time_step;
     int32_t substeps;
     int32_t iterations;
-    /* Cosserat segment/director alignment; independent of axial extension. */
-    float director_alignment_stiffness;
-    /* Inverse axial rigidity 1/(EA), SI 1/N. Zero enforces |x_b-x_a|=L0. */
-    float extension_compliance;
-    float bend_stiffness;
-    float quad_shear_stiffness;
-    float quad_area_stiffness;
-    float straight_pair_cosine;
-    int32_t seam_projection_passes;
-    float velocity_damping_per_second;
-    float maximum_speed;
+    /* Constant attraction magnitude for one unit-inverse-mass endpoint. */
+    float seam_attraction_force;
+    float seam_capture_distance;
+    /* Per-iteration material energy-projection fractions in [0, 1]. */
+    float stretch_relaxation;
+    float shear_relaxation;
+    float bend_relaxation;
     float maximum_position_correction;
     float contact_thickness;
 } ysc_config;
@@ -53,10 +48,11 @@ typedef struct ysc_create_desc {
     int32_t vertex_count;
     const float* positions;
     const float* velocities;
-    const float* rest_frame_positions;
-    const float* material_rest_positions;
     const float* inverse_masses;
     const int32_t* locked;
+
+    int32_t seam_count;
+    const int32_t* seams;
 
     int32_t edge_count;
     const int32_t* edges;
@@ -64,16 +60,14 @@ typedef struct ysc_create_desc {
 
     int32_t quad_count;
     const int32_t* quads;
+    /* Per quad: rest dot(u,u), dot(v,v), dot(u,v). */
+    const float* quad_rest_metrics;
 
-    int32_t seam_count;
-    const int32_t* seams;
-
-    int32_t face_count;
-    const int32_t* faces;
-
-    /* Complete Blender/collision mesh edges, including proxy diagonals. */
-    int32_t collision_edge_count;
-    const int32_t* collision_edges;
+    int32_t bend_count;
+    /* Per bend: previous, center, next vertex along one material axis. */
+    const int32_t* bends;
+    /* Per bend: the two positive rest segment lengths. */
+    const float* bend_rest_lengths;
 
     int32_t body_vertex_count;
     const float* body_positions;
@@ -83,34 +77,21 @@ typedef struct ysc_create_desc {
 
 typedef struct ysc_advance_desc {
     float gravity[3];
-    float seam_closure;
     int32_t iterations;
-
     int32_t body_candidate_count;
     const int32_t* body_candidates;
-    /* YSC_INTERNAL_SELF_COLLISION asks the solver to build a current native
-       neighbor list. Non-negative values retain the explicit-pair path. */
-    int32_t self_candidate_count;
-    const int32_t* self_candidates;
 } ysc_advance_desc;
 
 typedef struct ysc_stats {
     int32_t substeps;
     int32_t iterations;
-    int32_t segment_count;
-    int32_t angle_count;
+    int32_t seam_count;
+    int32_t captured_seam_count;
+    int32_t edge_count;
     int32_t quad_count;
+    int32_t bend_count;
     int32_t body_candidate_count;
-    /* Maximum native neighbor-list size during this advance. */
-    int32_t self_candidate_count;
-    int32_t self_broad_phase_rebuilds;
-    int64_t self_candidate_tests;
     float maximum_displacement;
-    float maximum_edge_strain;
-    float stretch_energy;
-    float bend_energy;
-    float shear_energy;
-    float area_energy;
 } ysc_stats;
 
 YSC_API int32_t ysc_get_api_version(void);
@@ -128,9 +109,6 @@ YSC_API void ysc_destroy(ysc_handle handle);
 YSC_API ysc_status ysc_get_counts(
     ysc_handle handle,
     int32_t* vertex_count,
-    int32_t* segment_count,
-    int32_t* angle_count,
-    int32_t* quad_count,
     int32_t* seam_count,
     char* error_message,
     int32_t error_capacity);
@@ -140,7 +118,6 @@ YSC_API ysc_status ysc_replace_state(
     const float* positions,
     const float* velocities,
     const int32_t* locked,
-    int32_t reinitialize_orientations,
     char* error_message,
     int32_t error_capacity);
 
@@ -151,27 +128,15 @@ YSC_API ysc_status ysc_copy_state(
     char* error_message,
     int32_t error_capacity);
 
-YSC_API ysc_status ysc_replace_orientations(
-    ysc_handle handle,
-    const float* quaternions_wxyz,
-    char* error_message,
-    int32_t error_capacity);
-
-YSC_API ysc_status ysc_copy_orientations(
-    ysc_handle handle,
-    float* quaternions_wxyz,
-    char* error_message,
-    int32_t error_capacity);
-
 YSC_API ysc_status ysc_replace_seam_state(
     ysc_handle handle,
-    const float* seam_maximum_lengths,
+    const float* seam_target_lengths,
     char* error_message,
     int32_t error_capacity);
 
 YSC_API ysc_status ysc_copy_seam_state(
     ysc_handle handle,
-    float* seam_maximum_lengths,
+    float* seam_target_lengths,
     char* error_message,
     int32_t error_capacity);
 

@@ -119,9 +119,8 @@ assert all(
     for a, b in c_connections
 )
 
-# RING construction coordinates must also provide a valid non-flat material
-# frame for the native solver.  With no gravity, seam closure, or nearby Body,
-# one short solve should remain finite and close to its constructed rest pose.
+# RING construction coordinates must remain finite under the same Body-independent
+# lattice model.  Constant seam attraction is active even with gravity disabled.
 preview = mesh_loader.create_sewn_mesh(bpy.context, collection)
 bpy.ops.mesh.primitive_cube_add(size=1.0, location=(100.0, 100.0, 100.0))
 fixed_body = bpy.context.object
@@ -134,10 +133,10 @@ session = kitsuke._KitsukeSession(
 )
 ring_start = session.positions.copy()
 try:
-    session.advance(bpy.context, 0.0, 0.0, 4)
+    session.advance(bpy.context, 0.0, 4)
     assert np.all(np.isfinite(session.positions))
     ring_drift = float(np.linalg.norm(session.positions - ring_start, axis=1).max())
-    assert ring_drift < 0.02, ring_drift
+    assert ring_drift < 0.25, ring_drift
 finally:
     session.runtime.close()
 

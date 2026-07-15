@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Host-Python smoke tests for the Stable Cosserat DLL bridge."""
+"""Host-Python tests for the square-lattice cloth native DLL bridge."""
 
 from __future__ import annotations
 
@@ -11,174 +11,98 @@ import numpy as np
 import cosserat_native
 
 
-@unittest.skipUnless(cosserat_native.native_library_available(), "Stable Cosserat DLL is not built")
-class NativeCosseratBridgeTests(unittest.TestCase):
-    def runtime(
-        self,
-        locked=(0, 0, 0),
-        *,
-        extension_compliance=cosserat_native.INEXTENSIBLE_EXTENSION_COMPLIANCE,
-    ):
-        positions = np.asarray(((0, 0, 0), (1, 0, 0), (2, 0, 0)), dtype=np.float32)
-        edges = np.asarray(((0, 1), (1, 2)), dtype=np.int32)
-        body = SimpleNamespace(
+@unittest.skipUnless(cosserat_native.native_library_available(), "Native solver DLL is not built")
+class NativeSolverBridgeTests(unittest.TestCase):
+    @staticmethod
+    def empty_body():
+        return SimpleNamespace(
             vertices=np.empty((0, 3), dtype=np.float32),
             faces=np.empty((0, 3), dtype=np.int32),
         )
+
+    @staticmethod
+    def empty_topology():
+        return SimpleNamespace(
+            edges=np.empty((0, 2), dtype=np.int32),
+            edge_rest_lengths=np.empty(0, dtype=np.float32),
+            quads=np.empty((0, 4), dtype=np.int32),
+            quad_rest_metrics=np.empty((0, 3), dtype=np.float32),
+            bends=np.empty((0, 3), dtype=np.int32),
+            bend_rest_lengths=np.empty((0, 2), dtype=np.float32),
+        )
+
+    def runtime(self, positions, *, locked=None, seams=None):
+        positions = np.asarray(positions, dtype=np.float32)
+        count = len(positions)
         return cosserat_native.NativeCosseratRuntime(
             positions,
             np.zeros_like(positions),
-            positions,
-            positions,
-            edges,
-            np.ones(2, dtype=np.float32),
-            np.empty((0, 4), dtype=np.int32),
-            np.empty((0, 2), dtype=np.int32),
-            np.empty((0, 3), dtype=np.int32),
-            edges,
-            body,
-            np.asarray(locked, dtype=np.int32),
-            extension_compliance=extension_compliance,
+            np.empty((0, 2), dtype=np.int32) if seams is None else np.asarray(seams, dtype=np.int32),
+            self.empty_topology(),
+            self.empty_body(),
+            np.zeros(count, dtype=np.int32) if locked is None else np.asarray(locked, dtype=np.int32),
         )
 
-    def test_counts_state_and_unit_orientations(self):
-        runtime = self.runtime()
+    def test_state_has_no_hidden_force(self):
+        authored = np.asarray(
+            ((0, 0, 0), (1.3, 0.2, 0.1), (1.1, 0.4, 1.4), (-0.2, -0.1, 0.9)),
+            dtype=np.float32,
+        )
+        runtime = self.runtime(authored)
         try:
-            self.assertEqual(runtime.vertex_count, 3)
-            self.assertEqual(runtime.segment_count, 2)
-            self.assertEqual(runtime.angle_count, 1)
-            self.assertEqual(runtime.quad_count, 0)
-            runtime.advance(
-                np.empty((0, 2), dtype=np.int32),
-                np.empty((0, 2), dtype=np.int32),
-                0.0,
-                0.0,
-                4,
-            )
+            self.assertEqual(runtime.vertex_count, 4)
+            self.assertEqual(runtime.seam_count, 0)
+            runtime.advance(np.empty((0, 2), np.int32), 0.0, 64)
             positions, velocities = runtime.state()
-            self.assertTrue(np.all(np.isfinite(positions)))
-            self.assertTrue(np.all(np.isfinite(velocities)))
-            orientations = runtime.orientation_state()
-            self.assertTrue(np.allclose(np.linalg.norm(orientations, axis=1), 1.0, atol=1.0e-5))
-            runtime.replace_orientation_state(-orientations)
-            self.assertTrue(np.allclose(runtime.orientation_state(), -orientations, atol=1.0e-6))
+            np.testing.assert_array_equal(positions, authored)
+            np.testing.assert_array_equal(velocities, 0.0)
+            self.assertEqual(int(runtime.last_stats["seam_count"]), 0)
+            self.assertEqual(int(runtime.last_stats["body_candidate_count"]), 0)
         finally:
             runtime.close()
 
-    def test_locked_vertices_can_be_unlocked_between_clicks(self):
-        runtime = self.runtime((1, 1, 1))
+    def test_locked_vertices_can_be_unlocked_for_gravity(self):
+        runtime = self.runtime(((0, 0, 0), (1, 0, 0)), locked=(1, 1))
         try:
-            before, _velocities = runtime.state()
-            runtime.replace_state(before, np.zeros_like(before), np.zeros(3, dtype=np.int32))
-            runtime.advance(
-                np.empty((0, 2), dtype=np.int32),
-                np.empty((0, 2), dtype=np.int32),
-                1.0,
-                0.0,
-                2,
-            )
-            after, _velocities = runtime.state()
+            before, _ = runtime.state()
+            runtime.replace_state(before, np.zeros_like(before), np.zeros(2, dtype=np.int32))
+            runtime.advance(np.empty((0, 2), np.int32), 1.0, 2)
+            after, _ = runtime.state()
             self.assertLess(float(after[:, 2].mean()), float(before[:, 2].mean()))
         finally:
             runtime.close()
 
-    def test_zero_extension_compliance_preserves_edge_lengths(self):
-        runtime = self.runtime((1, 0, 0), extension_compliance=0.0)
+    def test_seam_target_is_fixed_at_zero(self):
+        runtime = self.runtime(((0, 0, 0), (2, 0, 0)), seams=((0, 1),))
         try:
-            for _click in range(10):
-                runtime.advance(
-                    np.empty((0, 2), dtype=np.int32),
-                    np.empty((0, 2), dtype=np.int32),
-                    100.0,
-                    0.0,
-                    4,
+            runtime.advance(np.empty((0, 2), np.int32), 0.0, 1)
+            pulled, _ = runtime.state()
+            self.assertLess(float(np.linalg.norm(pulled[1] - pulled[0])), 2.0)
+            np.testing.assert_array_equal(runtime.seam_state(), (0.0,))
+        finally:
+            runtime.close()
+
+    def test_seam_attraction_is_constant_and_near_pairs_capture(self):
+        reductions = []
+        for initial_distance in (0.5, 0.45):
+            runtime = self.runtime(((0, 0, 0), (initial_distance, 0, 0)), seams=((0, 1),))
+            try:
+                runtime.advance(np.empty((0, 2), np.int32), 0.0, 1)
+                solved, _ = runtime.state()
+                reductions.append(
+                    initial_distance - float(np.linalg.norm(solved[1] - solved[0]))
                 )
-            positions, _velocities = runtime.state()
-            lengths = np.linalg.norm(positions[1:] - positions[:-1], axis=1)
-            np.testing.assert_allclose(lengths, 1.0, rtol=0.0, atol=1.0e-5)
-            self.assertLess(float(runtime.last_stats["maximum_edge_strain"]), 1.0e-5)
-        finally:
-            runtime.close()
+            finally:
+                runtime.close()
+        self.assertGreater(reductions[0], 0.0)
+        self.assertAlmostEqual(reductions[0], reductions[1], places=6)
 
-    def test_quad_connectivity_and_energy_stats_cross_the_abi(self):
-        positions = np.asarray(
-            ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)), dtype=np.float32
-        )
-        edges = np.asarray(((0, 1), (1, 2), (2, 3), (3, 0)), dtype=np.int32)
-        body = SimpleNamespace(
-            vertices=np.empty((0, 3), dtype=np.float32),
-            faces=np.empty((0, 3), dtype=np.int32),
-        )
-        runtime = cosserat_native.NativeCosseratRuntime(
-            positions,
-            np.zeros_like(positions),
-            positions,
-            positions,
-            edges,
-            np.ones(4, dtype=np.float32),
-            np.asarray(((0, 1, 2, 3),), dtype=np.int32),
-            np.empty((0, 2), dtype=np.int32),
-            np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int32),
-            np.asarray(((0, 1), (1, 2), (2, 3), (3, 0), (0, 2)), dtype=np.int32),
-            body,
-            np.zeros(4, dtype=np.int32),
-        )
+        runtime = self.runtime(((0, 0, 0), (0.05, 0, 0)), seams=((0, 1),))
         try:
-            self.assertEqual(runtime.quad_count, 1)
-            runtime.advance(
-                np.empty((0, 2), dtype=np.int32),
-                np.empty((0, 2), dtype=np.int32),
-                0.0,
-                0.0,
-                4,
-            )
-            self.assertEqual(runtime.last_stats["quad_count"], 1)
-            self.assertLess(abs(float(runtime.last_stats["shear_energy"])), 1.0e-6)
-            self.assertLess(abs(float(runtime.last_stats["area_energy"])), 1.0e-6)
-        finally:
-            runtime.close()
-
-    def test_native_self_collision_mode_crosses_the_abi(self):
-        positions = np.asarray(
-            (
-                (0.0, 0.0, 0.0),
-                (0.01, 0.0, 0.0),
-                (0.0, 0.01, 0.0),
-                (0.0025, 0.0025, 0.001),
-                (0.0025, 0.0025, 0.101),
-            ),
-            dtype=np.float32,
-        )
-        edges = np.asarray(((3, 4),), dtype=np.int32)
-        body = SimpleNamespace(
-            vertices=np.empty((0, 3), dtype=np.float32),
-            faces=np.empty((0, 3), dtype=np.int32),
-        )
-        runtime = cosserat_native.NativeCosseratRuntime(
-            positions,
-            np.zeros_like(positions),
-            positions,
-            positions,
-            edges,
-            np.asarray((0.1,), dtype=np.float32),
-            np.empty((0, 4), dtype=np.int32),
-            np.empty((0, 2), dtype=np.int32),
-            np.asarray(((0, 1, 2),), dtype=np.int32),
-            np.asarray(((0, 1), (1, 2), (2, 0), (3, 4)), dtype=np.int32),
-            body,
-            np.asarray((1, 1, 1, 0, 1), dtype=np.int32),
-        )
-        try:
-            runtime.advance(
-                np.empty((0, 2), dtype=np.int32),
-                None,
-                0.0,
-                0.0,
-                1,
-            )
-            self.assertGreater(int(runtime.last_stats["self_candidate_count"]), 0)
-            self.assertEqual(int(runtime.last_stats["self_broad_phase_rebuilds"]), 1)
-            self.assertGreater(int(runtime.last_stats["self_candidate_tests"]), 0)
+            runtime.advance(np.empty((0, 2), np.int32), 0.0, 1)
+            solved, _ = runtime.state()
+            self.assertLess(float(np.linalg.norm(solved[1] - solved[0])), 1.0e-7)
+            self.assertEqual(int(runtime.last_stats["captured_seam_count"]), 1)
         finally:
             runtime.close()
 

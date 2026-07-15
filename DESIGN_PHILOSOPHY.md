@@ -113,7 +113,7 @@ For the initial Update scope:
 - object names, collection ownership, materials, visibility, and Object Mode
   transforms are preserved;
 - the current 3D pose is transferred as an initial placement when possible;
-- new pattern dimensions replace all old stretch and bend rest data;
+- new pattern dimensions replace the previous generated mesh dimensions;
 - all velocities reset to zero;
 - the operation is all-or-nothing.
 
@@ -180,9 +180,6 @@ Implemented construction commands include:
 - `RING`: reserve two boundary edges for topological welding into a tube;
 - `@TOP`: select the circumferential position that faces maximum world Z on a
   RING tube.
-- `@TUBE`: opt two placed flat panels into a Body-stopped Sewing construction
-  pose with two shared longitudinal seam rails and opposing arches.
-
 On a RING panel, a sewing letter marks the complete boundary arc bounded by the
 two RING edges. This lets a sleeve armhole become one closed sewing path. The
 matching body armhole may remain split across front and back panels; Sewing

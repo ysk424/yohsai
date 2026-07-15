@@ -34,7 +34,7 @@ ysc_status classify_exception(const std::exception& exception) noexcept {
         return YSC_STATUS_OUT_OF_RANGE;
     }
     const std::string message = exception.what();
-    if (message.find("non-finite") != std::string::npos || message.find("invalid orientation") != std::string::npos) {
+    if (message.find("non-finite") != std::string::npos) {
         return YSC_STATUS_NONFINITE_STATE;
     }
     return YSC_STATUS_INTERNAL_ERROR;
@@ -102,23 +102,15 @@ void ysc_destroy(ysc_handle handle) {
 ysc_status ysc_get_counts(
     ysc_handle handle,
     int32_t* vertex_count,
-    int32_t* segment_count,
-    int32_t* angle_count,
-    int32_t* quad_count,
     int32_t* seam_count,
     char* error_message,
     int32_t error_capacity) {
     return guard(error_message, error_capacity, [&]() {
-        if (
-            vertex_count == nullptr || segment_count == nullptr || angle_count == nullptr ||
-            quad_count == nullptr || seam_count == nullptr) {
+        if (vertex_count == nullptr || seam_count == nullptr) {
             throw std::invalid_argument("count output pointer is null");
         }
         ysc::Solver& solver = require_solver(handle);
         *vertex_count = solver.vertex_count();
-        *segment_count = solver.segment_count();
-        *angle_count = solver.angle_count();
-        *quad_count = solver.quad_count();
         *seam_count = solver.seam_count();
     });
 }
@@ -128,15 +120,10 @@ ysc_status ysc_replace_state(
     const float* positions,
     const float* velocities,
     const int32_t* locked,
-    int32_t reinitialize_orientations,
     char* error_message,
     int32_t error_capacity) {
     return guard(error_message, error_capacity, [&]() {
-        require_solver(handle).replace_state(
-            positions,
-            velocities,
-            locked,
-            reinitialize_orientations != 0);
+        require_solver(handle).replace_state(positions, velocities, locked);
     });
 }
 
@@ -151,43 +138,23 @@ ysc_status ysc_copy_state(
     });
 }
 
-ysc_status ysc_replace_orientations(
-    ysc_handle handle,
-    const float* quaternions_wxyz,
-    char* error_message,
-    int32_t error_capacity) {
-    return guard(error_message, error_capacity, [&]() {
-        require_solver(handle).replace_orientations(quaternions_wxyz);
-    });
-}
-
-ysc_status ysc_copy_orientations(
-    ysc_handle handle,
-    float* quaternions_wxyz,
-    char* error_message,
-    int32_t error_capacity) {
-    return guard(error_message, error_capacity, [&]() {
-        require_solver(handle).copy_orientations(quaternions_wxyz);
-    });
-}
-
 ysc_status ysc_replace_seam_state(
     ysc_handle handle,
-    const float* seam_maximum_lengths,
+    const float* seam_target_lengths,
     char* error_message,
     int32_t error_capacity) {
     return guard(error_message, error_capacity, [&]() {
-        require_solver(handle).replace_seam_state(seam_maximum_lengths);
+        require_solver(handle).replace_seam_state(seam_target_lengths);
     });
 }
 
 ysc_status ysc_copy_seam_state(
     ysc_handle handle,
-    float* seam_maximum_lengths,
+    float* seam_target_lengths,
     char* error_message,
     int32_t error_capacity) {
     return guard(error_message, error_capacity, [&]() {
-        require_solver(handle).copy_seam_state(seam_maximum_lengths);
+        require_solver(handle).copy_seam_state(seam_target_lengths);
     });
 }
 

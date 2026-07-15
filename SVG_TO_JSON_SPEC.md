@@ -52,7 +52,7 @@ reference silhouettes do not participate and are safe to keep on the page.
 PDF line and cubic Bezier path operators are retained. The current parser
 requires an explicit `h` close-path operation; close-and-paint and implicit fill
 closure are not yet promoted to closed panels. Text annotations use `#`, `@W`,
-`@M`, `@TUBE`, `@TOP`, `RING`, and single-letter sewing syntax. The
+`@M`, `@TOP`, `RING`, and single-letter sewing syntax. The
 initial Illustrator compatibility profile also decodes its embedded
 Identity-H ASCII font convention when a ToUnicode map is absent.
 
@@ -113,11 +113,11 @@ part of the stored value. ASCII letters compare case-insensitively and normalize
 to uppercase. ASCII letters, digits, underscore, and hyphen are accepted. Empty,
 invalid, or duplicate normalized labels are errors.
 
-ASCII-only labels are the contract. Version 0.2.6 has a known Python
-case-insensitive-regex gap that may accept a small set of Unicode case-folding
+ASCII-only labels are the contract. The current Python case-insensitive regex
+may accept a small set of Unicode case-folding
 characters. Those accidental spellings are unsupported and must not be used.
 
-### 6.4 Mirror, RING, and TUBE construction
+### 6.4 Mirror and RING annotations
 
 `@M` and `@TOP` belong to the one labeled panel containing their text origin.
 `@M` creates two instances at Load: the authored geometry is LEFT and its
@@ -129,15 +129,6 @@ required on that panel and selects the circumferential location that maps to
 maximum world Z after Load wraps and welds the panel into a tube. RING cannot
 share a segment with `@W` or a sewing letter, and RING construction cannot be
 combined with fold expansion on the same panel.
-
-`@TUBE` belongs to the one labeled panel containing its text origin. Version 1
-requires exactly two `@TUBE` panels, rejects duplicates, and cannot combine it
-with `@M` or RING on the same panel. `@TUBE` is an opt-in Sewing-time placement
-command; it does not change flat pattern coordinates, material rest lengths, or
-panel identity. The mesh-level topology check in section 11 selects exactly two
-paired open sewing paths that span at least half of both panels' page-warp
-extent. Short shoulder seams and other construction seams remain ordinary
-sewing constraints.
 
 ## 7. Panel and segment identity
 
@@ -186,7 +177,6 @@ true`, and an ordered `segments` array. A labeled panel begins:
   "closed": true,
   "mirror": false,
   "top": null,
-  "tube": false,
   "segments": []
 }
 ```
@@ -247,7 +237,7 @@ It then exposes only the four primary actions in workflow order:
 - `Load`: parse the pattern and create separate cloth-part objects;
 - `Update`: recut the selected Clothes collection from the same saved file;
 - `Sewing`: build the combined sewn preview after manual part placement;
-- `Kitsuke`: advance a short Taichi simulation and restore separate parts;
+- `Kitsuke`: advance a short cloth simulation and restore separate parts;
 
 A short status message appears below the actions. Solver tuning and silhouette
 export are intentionally absent from this production panel.
@@ -277,17 +267,16 @@ The flat width between them becomes the tube circumference, `@TOP` fixes the
 upward radial direction, and corresponding RING vertices are topologically
 welded. The result is one connected annular mesh rather than two boundaries
 held together by sewing springs. The flat pattern edge lengths remain the
-stretch rest lengths; the constructed cylinder is the bend rest shape.
+authored mesh dimensions.
 
 ### 10.3 Grain-aligned material mesh and triangulated proxy
 
 Bezier and line boundaries are sampled at no more than approximately `0.005 m`
-between boundary vertices. Version 0.5.0 fills the interior from a global 5 mm
+between boundary vertices. Yohsai fills the interior from a global 5 mm
 square grid in pattern-page coordinates: page vertical is warp and page
-horizontal is weft. Complete square cells supply the Stable Cosserat material
-lattice. Their two Blender/collision faces retain one proxy diagonal that is
-excluded from the rod graph. Arbitrary panel cuts leave a narrow constrained
-triangular transition near the boundary. `Load` does not create loose
+horizontal is weft. Complete square cells retain grain metadata. Their two
+Blender/collision faces share one proxy diagonal. Arbitrary panel cuts leave a
+narrow triangular transition near the boundary. `Load` does not create loose
 sewing-preview edges, perform Sewing, or add a Blender Cloth modifier.
 
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
@@ -364,38 +353,20 @@ kept in the same collection but hidden in the viewport and render. No Cloth
 modifier is added in this step. Repeating `Sewing` for a collection that already
 contains a sewn mesh is an error.
 
-For two `@TUBE` panels, Sewing additionally requires a selected mesh Body and a
-usable world-space placement of the source panels. The two long path pairs form
-shared longitudinal rail curves parameterized by normalized authored length.
-The panels map to opposing circular arches between those rails; geometry beyond
-a rail endpoint continues along the page-warp tangent rather than collapsing
-onto the endpoint. The Body center selects the first outward side and the other
-panel bows oppositely.
-
-The construction family starts with a flat candidate and then reduces effective
-radius in 10 mm increments. Every candidate is generated directly and checked
-against one evaluated Body BVH. The first contact and preceding clear candidate
-are refined four times. At most 99 candidates are evaluated, and the retained
-preview is the clear side of the 5 mm contact boundary. Missing Body, ambiguous
-or non-long rails, excessive width mismatch, a flat candidate already in
-contact, or failure to find a contact bracket cancels Sewing before any source
-object is hidden or modified.
-
 ## 12. Kitsuke
 
 The combined `Sewing` object is a visual verification and connectivity record,
 not the persistent editing representation. On the first `Kitsuke`, Yohsai reads
-its loose sewing edges and verified preview positions, snapshots the evaluated
-Body, and creates a transient simulation containing all source panels. An
-`@TUBE` preview also initializes its non-flat Cosserat director frame; flat
-pattern coordinates remain the material rest state. Later clicks reuse that
-live runtime. The pattern edge lengths remain the stretch rest lengths, paired seam
-vertices progressively approach zero distance, and body and self contact use a
-0.002 m thickness.
+its loose sewing edges and the positioned source-panel vertices, snapshots the
+evaluated Body for collision, and creates a transient simulation containing all
+source panels. Later clicks reuse that live runtime. Pattern rest lengths,
+square-cell metrics, and straight warp/weft triples define the cloth's internal
+response. Paired seam vertices receive distance-independent attraction until
+they are captured at their fixed zero-length goal. Body contact uses a 0.005 m
+thickness. Self-contact is absent.
 
-One click advances sixteen fixed 1/240-second steps and closes each transient
-seam target by 0.030 m under a default 1.0 m/s² downward acceleration. This
-count is deliberately not exposed in the user interface.
+One click advances eight fixed 1/240-second steps under a default 1.0 m/s²
+downward acceleration. Seam targets do not change per click.
 After the calculation, positions are mapped
 back by source object and vertex index, the combined preview is removed, and
 the separate source objects are shown. The user may translate and rotate any
@@ -407,24 +378,20 @@ vertex edits and same-vertex-count topology edits are unsupported but are not
 yet completely detected; topology must be changed in the pattern. The Body is
 constant within one live runtime.
 
-Version 0.2.0 mirrors exact seam pairs and targets, per-vertex velocity,
-revision, runtime epoch, and accepted Object Mode matrices into undoable Blender
-data after every successful click. Version 0.4.0 additionally stores the solver
-backend and one Stable Cosserat quaternion per edge. Blender `undo_post` and
+Exact seam pairs and fixed targets, per-vertex velocity, revision, runtime epoch,
+Object Mode matrices, and solver backend are stored in undoable Blender data
+after every committed click. Blender `undo_post` and
 `redo_post` handlers discard non-undoable live runtimes. The next Kitsuke
-reconstructs them from the state restored by Blender, preventing a 30 mm seam
-stage from being skipped. Recovery data is valid only for the current add-on
+reconstructs them from the state restored by Blender. Recovery data is valid only for the current add-on
 runtime. Continuing an abandoned partially dressed session after reopening
 Blender or reloading the add-on is unsupported.
 
-Version 0.2.0 uses the tested gravity and seam-closure defaults internally.
-They are solver constants rather than pattern data and do not alter the JSON
-contract.
-
-Version 0.4.0 introduced the native Stable Cosserat Windows x64 CPU DLL as the
-default; later versions retain it. Legacy Taichi PBD remains selectable,
-chooses an available GPU architecture automatically, and uses an explicit CPU
-fallback. The package supplies Windows x64 CPython 3.13 wheels.
+Gravity and material relaxation values are runtime controls rather than pattern
+data and do not alter the JSON contract. Blender reads the nonnegative gravity
+magnitude on every Kitsuke click and applies it in world -Z; the default is
+1.0 m/s² and zero disables gravity. Material rest data is taken only from the
+pattern mesh; Body data is collision-only. The default backend is the native
+Windows x64 CPU library.
 
 ## 13. Update
 
@@ -445,8 +412,8 @@ transfer uses the welded cylinder surface as the correspondence domain because
 a welded seam vertex cannot carry both sides of an unwrapped 2D coordinate.
 
 Existing objects, transforms, materials, collection membership, names, and
-panel indices remain. Revised flat coordinates define new stretch and bend rest
-lengths. Runtime velocity and the previous Kitsuke session are discarded.
+panel indices remain. Runtime velocity and the previous Kitsuke session are
+discarded.
 
 Update prepares all meshes before changing Blender data. Any missing, duplicate,
 unexpected, or ambiguous label, panel-count change, parse error, triangulation
@@ -454,7 +421,7 @@ error, or transfer failure cancels the whole operation without modifying the
 existing garment.
 
 The sewing signature contains normalized sewing labels, panel/segment
-membership, mirror and TUBE flags, TOP coordinates, and RING segment indices, but not
+membership, mirror flags, TOP coordinates, and RING segment indices, but not
 ordinary geometry coordinates. An unchanged signature preserves the verified
 Sewing state and permits direct Kitsuke. A changed signature clears verification;
 Kitsuke refuses with `Sewing required` until Sewing succeeds.
