@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define YSC_API_VERSION 7
+#define YSC_API_VERSION 8
 
 typedef void* ysc_handle;
 
@@ -33,15 +33,23 @@ typedef struct ysc_config {
     float time_step;
     int32_t substeps;
     int32_t iterations;
-    /* Constant attraction magnitude for one unit-inverse-mass endpoint. */
-    float seam_attraction_force;
+    /* Per-iteration closure distance for an uncaptured seam pair, in metres.
+       Constant, so pair distance does not change the closing rate. */
+    float seam_attraction_step;
     float seam_capture_distance;
     /* Per-iteration material energy-projection fractions in [0, 1]. */
     float stretch_relaxation;
     float shear_relaxation;
     float bend_relaxation;
+    /* Rest-length fraction a warp/weft span may gain before it becomes a hard
+       wall.  This is the weave's crimp reserve, not yarn elongation. */
+    float stretch_limit;
     float maximum_position_correction;
     float contact_thickness;
+    /* Velocity fraction a Body-contacting vertex keeps across a substep.  Zero
+       dissipates all kinetic energy at the contact, so Body motion can never
+       accelerate the cloth. */
+    float contact_velocity_retention;
 } ysc_config;
 
 typedef struct ysc_create_desc {

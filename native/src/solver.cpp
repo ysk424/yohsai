@@ -32,13 +32,15 @@ ysc_config default_config() {
     config.time_step = 1.0F / 240.0F;
     config.substeps = 8;
     config.iterations = 16;
-    config.seam_attraction_force = 300.0F;
+    config.seam_attraction_step = 0.008F;
     config.seam_capture_distance = 0.002F;
     config.stretch_relaxation = 1.0F;
     config.shear_relaxation = 0.02F;
-    config.bend_relaxation = 0.0001F;
+    config.bend_relaxation = 0.02F;
+    config.stretch_limit = 0.05F;
     config.maximum_position_correction = 0.005F;
     config.contact_thickness = 0.005F;
+    config.contact_velocity_retention = 0.0F;
     return config;
 }
 
@@ -179,6 +181,7 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
 
     contact_corrections_.resize(vertices_.size());
     contact_correction_counts_.resize(vertices_.size());
+    seam_driven_.resize(vertices_.size());
     require_finite_state();
 }
 
@@ -194,7 +197,7 @@ void Solver::validate_config() const {
     if (
         !(config_.time_step > 0.0F) || !std::isfinite(config_.time_step) ||
         config_.substeps <= 0 || config_.iterations <= 0 ||
-        !(config_.seam_attraction_force > 0.0F) || !std::isfinite(config_.seam_attraction_force) ||
+        !(config_.seam_attraction_step > 0.0F) || !std::isfinite(config_.seam_attraction_step) ||
         !(config_.seam_capture_distance > 0.0F) || !std::isfinite(config_.seam_capture_distance) ||
         config_.stretch_relaxation < 0.0F || config_.stretch_relaxation > 1.0F ||
         !std::isfinite(config_.stretch_relaxation) ||
@@ -202,9 +205,12 @@ void Solver::validate_config() const {
         !std::isfinite(config_.shear_relaxation) ||
         config_.bend_relaxation < 0.0F || config_.bend_relaxation > 1.0F ||
         !std::isfinite(config_.bend_relaxation) ||
+        config_.stretch_limit < 0.0F || !std::isfinite(config_.stretch_limit) ||
         !(config_.maximum_position_correction > 0.0F) ||
         !std::isfinite(config_.maximum_position_correction) ||
-        !(config_.contact_thickness > 0.0F) || !std::isfinite(config_.contact_thickness)) {
+        !(config_.contact_thickness > 0.0F) || !std::isfinite(config_.contact_thickness) ||
+        config_.contact_velocity_retention < 0.0F || config_.contact_velocity_retention > 1.0F ||
+        !std::isfinite(config_.contact_velocity_retention)) {
         throw std::invalid_argument("solver configuration contains an invalid active value");
     }
 }
@@ -274,33 +280,36 @@ void Solver::integrate(const Vec3& gravity, float time_step) {
     }
 }
 
-void Solver::apply_seam_attraction(float time_step) {
-    std::vector<Vec3> impulses(vertices_.size());
+void Solver::project_seam_attraction() {
+    // Sewing drags the panel kinematically; it is the operator's intent, not a
+    // force.  Neither this pull nor the material's reaction to it may become
+    // momentum, or the pair accelerates itself across the substeps.
+    std::fill(seam_driven_.begin(), seam_driven_.end(), 0);
     for (const Seam& seam : seams_) {
         if (seam.captured) {
             continue;
         }
-        const Vertex& a = vertices_[static_cast<size_t>(seam.a)];
-        const Vertex& b = vertices_[static_cast<size_t>(seam.b)];
+        seam_driven_[static_cast<size_t>(seam.a)] = 1;
+        seam_driven_[static_cast<size_t>(seam.b)] = 1;
+        Vertex& a = vertices_[static_cast<size_t>(seam.a)];
+        Vertex& b = vertices_[static_cast<size_t>(seam.b)];
+        const float a_weight = (!a.locked && a.inverse_mass > 0.0F) ? a.inverse_mass : 0.0F;
+        const float b_weight = (!b.locked && b.inverse_mass > 0.0F) ? b.inverse_mass : 0.0F;
+        const float weight_sum = a_weight + b_weight;
+        if (!(weight_sum > 0.0F)) {
+            continue;
+        }
         const Vec3 difference = b.position - a.position;
         const float current_length = length(difference);
         if (!(current_length > kEpsilon)) {
             continue;
         }
-        const Vec3 impulse =
-            (config_.seam_attraction_force * time_step / current_length) * difference;
-        if (!a.locked && a.inverse_mass > 0.0F) {
-            impulses[static_cast<size_t>(seam.a)] += a.inverse_mass * impulse;
-        }
-        if (!b.locked && b.inverse_mass > 0.0F) {
-            impulses[static_cast<size_t>(seam.b)] -= b.inverse_mass * impulse;
-        }
-    }
-    for (size_t index = 0; index < vertices_.size(); ++index) {
-        Vertex& vertex = vertices_[index];
-        if (!vertex.locked && vertex.inverse_mass > 0.0F) {
-            vertex.velocity += impulses[index];
-        }
+        // A fixed closure keeps the rate independent of how far apart the pair
+        // still is; never step past the pair, the capture test shuts the rest.
+        const float closure = std::min(config_.seam_attraction_step, current_length);
+        const Vec3 direction = difference / current_length;
+        a.position += (a_weight / weight_sum * closure) * direction;
+        b.position -= (b_weight / weight_sum * closure) * direction;
     }
 }
 
@@ -360,15 +369,33 @@ void Solver::project_seams() {
     }
 }
 
+void Solver::project_edge(const Edge& edge) {
+    const Vec3 difference =
+        vertices_[static_cast<size_t>(edge.b)].position -
+        vertices_[static_cast<size_t>(edge.a)].position;
+    const float current_length = length(difference);
+    const float maximum_length = edge.rest_length * (1.0F + config_.stretch_limit);
+    if (current_length > maximum_length) {
+        // The crimp reserve is spent; the yarn itself does not elongate.
+        project_distance(edge.a, edge.b, maximum_length, 1.0F);
+        return;
+    }
+    if (current_length > edge.rest_length) {
+        project_distance(edge.a, edge.b, edge.rest_length, config_.stretch_relaxation);
+    }
+    // Below the rest length the span buckles out of plane instead of resisting,
+    // which is what lets the cloth fold.
+}
+
 void Solver::project_edges(bool reverse) {
     if (!reverse) {
         for (const Edge& edge : edges_) {
-            project_distance(edge.a, edge.b, edge.rest_length, config_.stretch_relaxation);
+            project_edge(edge);
         }
         return;
     }
     for (auto iterator = edges_.rbegin(); iterator != edges_.rend(); ++iterator) {
-        project_distance(iterator->a, iterator->b, iterator->rest_length, config_.stretch_relaxation);
+        project_edge(*iterator);
     }
 }
 
@@ -519,13 +546,15 @@ void Solver::clear_contact_corrections() {
 }
 
 void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
+    // Clear first: the counts double as this substep's contact flags, so stale
+    // ones would keep damping a vertex that has already left the Body.
+    clear_contact_corrections();
     if (count <= 0) {
         return;
     }
     if (candidates == nullptr) {
         throw std::invalid_argument("Body candidate pointer is null");
     }
-    clear_contact_corrections();
     for (int32_t index = 0; index < count; ++index) {
         const int32_t vertex_index = candidates[index * 2];
         const int32_t face_index = candidates[index * 2 + 1];
@@ -558,11 +587,24 @@ void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
 }
 
 void Solver::finish_substep(float time_step) {
-    for (Vertex& vertex : vertices_) {
+    for (size_t index = 0; index < vertices_.size(); ++index) {
+        Vertex& vertex = vertices_[index];
         if (vertex.locked || vertex.inverse_mass <= 0.0F) {
             vertex.velocity = {};
-        } else {
-            vertex.velocity = (vertex.position - vertex.previous) / time_step;
+            continue;
+        }
+        if (seam_driven_[index] != 0) {
+            // Still being sewn: the span's motion is the drag and the material's
+            // answer to it, neither of which the pair may coast on afterwards.
+            vertex.velocity = {};
+            continue;
+        }
+        vertex.velocity = (vertex.position - vertex.previous) / time_step;
+        if (contact_correction_counts_[index] > 0) {
+            // Contact is purely dissipative: it may remove kinetic energy but
+            // never adds any, so a moving Body cannot fling the cloth.  Gravity
+            // re-drives the span each substep, so it still creeps and settles.
+            vertex.velocity *= config_.contact_velocity_retention;
         }
     }
 }
@@ -606,7 +648,11 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     }
 
     for (int32_t substep = 0; substep < config_.substeps; ++substep) {
-        apply_seam_attraction(config_.time_step);
+        // Ahead of the prediction, so integrate() rebases `previous` onto the
+        // dragged position and the pull itself contributes no velocity.  Once
+        // per substep, so the iteration count stays a convergence knob and does
+        // not change how fast a seam sews shut.
+        project_seam_attraction();
         integrate(gravity, config_.time_step);
         update_seam_capture();
         for (int32_t iteration = 0; iteration < iterations; ++iteration) {
@@ -618,20 +664,8 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             // Keep the material edges last: shear and curvature may rearrange a
             // cell, but they must never leave its warp/weft span torn open.
             project_edges(reverse);
-            project_edges(!reverse);
-            project_edges(reverse);
-            project_edges(!reverse);
-            project_seams();
             project_body_contacts(desc.body_candidates, desc.body_candidate_count);
         }
-        // A strong sewing load must move the cloth, not leave a stretched
-        // one-edge spike at the stitch.  Finish by converging the material
-        // lengths and any captured seam together before the final contact pass.
-        for (int32_t cleanup = 0; cleanup < iterations * 4; ++cleanup) {
-            project_edges((cleanup & 1) != 0);
-            project_seams();
-        }
-        project_body_contacts(desc.body_candidates, desc.body_candidate_count);
         finish_substep(config_.time_step);
         require_finite_state();
     }

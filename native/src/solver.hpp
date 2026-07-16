@@ -75,12 +75,14 @@ private:
     std::vector<Face> body_faces_;
     std::vector<Vec3> contact_corrections_;
     std::vector<int32_t> contact_correction_counts_;
+    std::vector<int32_t> seam_driven_;
 
     void validate_config() const;
-    void apply_seam_attraction(float time_step);
+    void project_seam_attraction();
     void integrate(const Vec3& gravity, float time_step);
     void update_seam_capture();
     void project_seams();
+    void project_edge(const Edge& edge);
     void project_edges(bool reverse);
     void project_quad_shear(bool reverse);
     void project_bends(bool reverse);

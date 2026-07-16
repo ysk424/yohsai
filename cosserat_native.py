@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 
-API_VERSION = 7
+API_VERSION = 8
 _ERROR_CAPACITY = 1024
 
 
@@ -27,13 +27,15 @@ class _Config(ctypes.Structure):
         ("time_step", ctypes.c_float),
         ("substeps", ctypes.c_int32),
         ("iterations", ctypes.c_int32),
-        ("seam_attraction_force", ctypes.c_float),
+        ("seam_attraction_step", ctypes.c_float),
         ("seam_capture_distance", ctypes.c_float),
         ("stretch_relaxation", ctypes.c_float),
         ("shear_relaxation", ctypes.c_float),
         ("bend_relaxation", ctypes.c_float),
+        ("stretch_limit", ctypes.c_float),
         ("maximum_position_correction", ctypes.c_float),
         ("contact_thickness", ctypes.c_float),
+        ("contact_velocity_retention", ctypes.c_float),
     ]
 
 
