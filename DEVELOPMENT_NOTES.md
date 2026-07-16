@@ -9,8 +9,11 @@ Status: current development state
 - Sewing records connectivity from positioned source parts and never queries Body.
 - Kitsuke starts from source-part world vertices.
 - Seam goals are fixed at zero and do not shorten per click.
+- Sewing drags a pair kinematically and contributes no momentum.
 - Pattern edges, square metrics, and axial triples provide cloth internal energy.
-- Body participates only through contact correction.
+- Pattern edges hold their authored length in both directions; the lattice folds
+  by bending out of plane, not by letting a span collapse.
+- Body participates only through contact correction, which dissipates only.
 - Self-contact and Body-relative rest-shape forces are absent.
 - Gravity is read from the N-panel on each click and applied in world -Z.
 - Only a non-finite returned state causes click rollback; finite displacement is
