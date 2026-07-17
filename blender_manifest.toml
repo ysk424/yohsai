@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.6.4"
+version = "0.7.0"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -20,6 +20,7 @@ wheels = [
 
 [permissions]
 files = "Load pattern PDF and write Yohsai JSON"
+network = "Configure ZOZO Contact Solver through its localhost MCP server"
 
 [build]
 paths = [
@@ -28,6 +29,8 @@ paths = [
     "build_native.ps1",
     "ui.py",
     "kitsuke.py",
+    "zozo_handoff.py",
+    "zozo_mcp_client.py",
     "cosserat_native.py",
     "mesh_loader.py",
     "yohsai_svg_parser.py",
@@ -36,6 +39,7 @@ paths = [
     "KITSUKE_DESIGN.md",
     "COSSERAT_DESIGN.md",
     "GRAINLINE_DESIGN.md",
+    "XPBD_HANDOFF_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
     "README.md",

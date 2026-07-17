@@ -50,6 +50,15 @@ Recorded: 2026-07-17 (Asia/Tokyo)
   and iteration controls are intentionally absent from the beginner-facing UI.
 - Finite per-click movement has no rollback threshold; only non-finite state is
   rolled back.
+- `Prepare for ZOZO` is a post-GRAVITY, non-destructive hand-off. It creates
+  dedicated cloth and Body copies, gives every loose seam edge at least 2.21 mm
+  initial separation, and configures only Yohsai-named SHELL/STATIC groups via
+  ZOZO MCP on localhost port 9633. It never starts Transfer or Run Simulation.
+- Blender 5.2 XPBD uses the official Geometry Nodes `Cloth Dynamics
+  (Experimental)` and `Collider` assets, not a new Cloth modifier. It requires
+  a separate future button because its stitch edges need zero `rest_length`,
+  the opposite of ZOZO's positive initial seam gap. See
+  `XPBD_HANDOFF_DESIGN.md`.
 
 ## Interpretation rule
 
@@ -106,7 +115,9 @@ material terms only; the garment scene remains the real check.
 
 ## Release
 
-Current release: `yohsai-0.6.4.zip`, the independent state/Lock GRAVITY release.
+Current packaged release: `yohsai-0.6.5.zip`, the flattened PDF-layer and `//`
+comment release. The working-tree manifest is 0.7.0 for Prepare for ZOZO; no
+0.7.0 archive has been built yet.
 Its exact size and SHA-256 are reported alongside the built artifact so
 this packaged document does not contain a self-invalidating archive hash.
 

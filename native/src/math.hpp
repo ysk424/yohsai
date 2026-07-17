@@ -100,9 +100,12 @@ inline Vec3 normalized(const Vec3& value, const Vec3& fallback = {0.0F, 0.0F, 1.
 }
 
 inline Vec3 clamp_length(const Vec3& value, float maximum) {
-    const float magnitude = length(value);
-    if (maximum > 0.0F && magnitude > maximum) {
-        return value * (maximum / magnitude);
+    if (!(maximum > 0.0F)) {
+        return value;
+    }
+    const float magnitude_squared = length_squared(value);
+    if (magnitude_squared > maximum * maximum) {
+        return value * (maximum / std::sqrt(magnitude_squared));
     }
     return value;
 }

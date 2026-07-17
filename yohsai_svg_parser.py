@@ -812,6 +812,7 @@ def _pdf_collect_content(
     text_matrix = Matrix()
     text_line_matrix = Matrix()
     current_font = None
+    pending_text_annotations: list[Annotation] = []
 
     def finish_open_subpath() -> None:
         nonlocal current, current_point, start_point
@@ -853,6 +854,14 @@ def _pdf_collect_content(
         current = None
         current_point = None
 
+    def finish_text_block() -> None:
+        if not pending_text_annotations:
+            return
+        combined = "".join(annotation.text for annotation in pending_text_annotations).lstrip()
+        if not combined.startswith("//"):
+            annotations.extend(pending_text_annotations)
+        pending_text_annotations.clear()
+
     def emit_text(operands: object) -> None:
         pieces: list[str] = []
         values = operands[0] if operands else []
@@ -865,7 +874,9 @@ def _pdf_collect_content(
         text = "".join(pieces).strip()
         if text:
             origin_matrix = ctm @ text_matrix
-            annotations.append(Annotation(text, _pdf_point(origin_matrix, 0.0, 0.0)))
+            pending_text_annotations.append(
+                Annotation(text, _pdf_point(origin_matrix, 0.0, 0.0))
+            )
 
     for operands, operator in stream.operations:
         if operator == b"q":
@@ -912,6 +923,7 @@ def _pdf_collect_content(
             start_point = None
             pending.clear()
         elif operator == b"BT":
+            finish_text_block()
             text_matrix = Matrix()
             text_line_matrix = Matrix()
             current_font = None
@@ -928,6 +940,13 @@ def _pdf_collect_content(
             text_matrix = text_line_matrix
         elif operator in {b"Tj", b"TJ"}:
             emit_text(operands)
+        elif operator == b"ET":
+            finish_text_block()
+        elif operator in {b"BMC", b"BDC", b"EMC"}:
+            # PDF marked-content boundaries, including optional-content layers,
+            # are intentionally transparent. Illustrator's editable layer and
+            # sublayer names never select or exclude Yohsai pattern content.
+            continue
         elif operator == b"Do":
             reference = resources.get("/XObject", {}).get(operands[0])
             if reference is None:
@@ -936,6 +955,7 @@ def _pdf_collect_content(
             if str(form.get("/Subtype", "")) == "/Form":
                 form_matrix = _pdf_matrix(form.get("/Matrix", [1, 0, 0, 1, 0, 0]))
                 _pdf_collect_content(form, reader, ctm @ form_matrix, paths, annotations)
+    finish_text_block()
 
 
 def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
@@ -987,7 +1007,6 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
         "version": SCHEMA_VERSION,
         "source": {
             "svg_path": source_path.as_posix(),
-            "clothes_layer": "PDF # labeled panels",
             "input_format": "pdf",
         },
         "units": "m",

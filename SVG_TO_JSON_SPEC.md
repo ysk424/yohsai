@@ -60,6 +60,15 @@ PDF coordinates are points and convert directly to meters with
 `0.0254 / 72`. `@S` scale annotations are obsolete and rejected. Page Y is
 flipped into Yohsai's upward-positive pattern coordinates.
 
+Illustrator layer and sublayer names are editing metadata, not pattern input.
+The parser does not look for `CLOTHES`, `INFORMATION`, or any other layer name;
+all standard page content is read as one flattened drawing. PDF marked-content
+and optional-content boundaries likewise do not include or exclude content.
+
+A PDF text object whose first non-whitespace characters are `//` is a comment.
+The complete text object is ignored, including later `Tj`/`TJ` fragments inside
+the same `BT`/`ET` block.
+
 ### 3.2 SVG input profile
 
 SVG input is no longer supported. The public parser rejects `.svg` files and
@@ -151,7 +160,6 @@ The output is UTF-8 JSON with this top-level structure:
   "version": "1.0.0",
   "source": {
     "svg_path": "C:/patterns/example.pdf",
-    "clothes_layer": "PDF # labeled panels",
     "input_format": "pdf"
   },
   "units": "m",

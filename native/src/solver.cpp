@@ -370,9 +370,10 @@ void Solver::project_seams() {
 }
 
 void Solver::project_edge(const Edge& edge) {
+    Vertex& a = vertices_[static_cast<size_t>(edge.a)];
+    Vertex& b = vertices_[static_cast<size_t>(edge.b)];
     const Vec3 difference =
-        vertices_[static_cast<size_t>(edge.b)].position -
-        vertices_[static_cast<size_t>(edge.a)].position;
+        b.position - a.position;
     const float current_length = length(difference);
     // Both directions.  A yarn does not elongate, and the centimetre between two
     // crossings does not shorten either: cloth folds by bending the lattice out
@@ -385,11 +386,29 @@ void Solver::project_edge(const Edge& edge) {
     // Always aim at the rest length; only the firmness changes.  Aiming at the
     // reserve bound instead would leave a span just past it stretched further
     // than one just inside it.
-    project_distance(
-        edge.a,
-        edge.b,
-        edge.rest_length,
-        beyond_crimp_reserve ? 1.0F : config_.stretch_relaxation);
+    const float relaxation = beyond_crimp_reserve ? 1.0F : config_.stretch_relaxation;
+    if (!(relaxation > 0.0F) || !(current_length > kEpsilon)) {
+        return;
+    }
+    const float a_weight = (!a.locked && a.inverse_mass > 0.0F) ? a.inverse_mass : 0.0F;
+    const float b_weight = (!b.locked && b.inverse_mass > 0.0F) ? b.inverse_mass : 0.0F;
+    const float weight_sum = a_weight + b_weight;
+    if (!(weight_sum > 0.0F)) {
+        return;
+    }
+    const Vec3 direction = difference / current_length;
+    const float scaled_error =
+        relaxation * (current_length - edge.rest_length) / weight_sum;
+    if (a_weight > 0.0F) {
+        a.position += clamp_length(
+            a_weight * scaled_error * direction,
+            config_.maximum_position_correction);
+    }
+    if (b_weight > 0.0F) {
+        b.position -= clamp_length(
+            b_weight * scaled_error * direction,
+            config_.maximum_position_correction);
+    }
 }
 
 void Solver::project_edges(bool reverse) {

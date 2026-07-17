@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yohsai_svg_parser as parser
 
@@ -35,12 +36,44 @@ class SvgParserTests(unittest.TestCase):
             parser.parse_svg("input.svg")
 
     @unittest.skipUnless(importlib.util.find_spec("pypdf"), "pypdf is not installed in this test interpreter")
+    def test_pdf_comments_and_layer_markers_are_ignored(self) -> None:
+        class FakeContentStream:
+            def __init__(self, _contents, _reader):
+                self.operations = [
+                    (["/OC", "/CLOTHES"], b"BDC"),
+                    ([], b"BT"),
+                    (["//Pattern:"], b"Tj"),
+                    (["A"], b"Tj"),
+                    ([], b"ET"),
+                    ([], b"EMC"),
+                    (["/OC", "/ANY_LAYER_NAME"], b"BDC"),
+                    ([], b"BT"),
+                    (["#PANEL"], b"Tj"),
+                    ([], b"ET"),
+                    ([], b"EMC"),
+                ]
+
+        owner = {"/Type": "/Page", "/Contents": object(), "/Resources": {}}
+        paths: list[parser.Subpath] = []
+        annotations: list[parser.Annotation] = []
+        with patch("pypdf.generic.ContentStream", FakeContentStream):
+            parser._pdf_collect_content(
+                owner,
+                object(),
+                parser.Matrix(),
+                paths,
+                annotations,
+            )
+        self.assertEqual([annotation.text for annotation in annotations], ["#PANEL"])
+
+    @unittest.skipUnless(importlib.util.find_spec("pypdf"), "pypdf is not installed in this test interpreter")
     def test_supplied_illustrator_pdf(self) -> None:
         source = Path.home() / "Desktop" / "test2.pdf"
         if not source.is_file():
             self.skipTest("The user-supplied Desktop/test2.pdf is not available.")
         document = parser.parse_pdf(source)
         self.assertEqual(document["source"]["input_format"], "pdf")
+        self.assertNotIn("clothes_layer", document["source"])
         self.assertEqual(
             [panel["label"] for panel in document["panels"]],
             ["OMOTE_LAWN60", "URA_LAWN60"],
@@ -62,6 +95,7 @@ class SvgParserTests(unittest.TestCase):
         if not source.is_file():
             self.skipTest("The user-supplied Desktop/test3.pdf is not available.")
         document = parser.parse_pdf(source)
+        self.assertNotIn("clothes_layer", document["source"])
         self.assertEqual([panel["label"] for panel in document["panels"]], ["OMOTE", "URA", "SODE"])
         sleeve = document["panels"][2]
         self.assertTrue(sleeve["mirror"])

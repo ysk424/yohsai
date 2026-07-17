@@ -38,6 +38,7 @@ from .mesh_loader import (
     remove_sewn_preview,
     update_clothes_mesh,
 )
+from .zozo_handoff import ZOZO_MCP_PORT, ZozoHandoffError, prepare_for_zozo
 
 
 _parse_process: subprocess.Popen[str] | None = None
@@ -46,8 +47,13 @@ _parse_svg_path: str | None = None
 _parse_action: str | None = None
 _parse_collection_name: str | None = None
 _loaded_pattern_json: dict | None = None
+_zozo_process: subprocess.Popen[str] | None = None
+_zozo_scene_name: str | None = None
+_zozo_prepared_summary: str | None = None
 _PARSER_FILENAME = "yohsai_svg_parser.py"
 _JSON_FILENAME = "yohsai_pattern.json"
+_ZOZO_CLIENT_FILENAME = "zozo_mcp_client.py"
+_ZOZO_CONFIG_FILENAME = "zozo_mcp_config.json"
 
 
 @persistent
@@ -264,6 +270,44 @@ def _poll_svg_parser() -> float | None:
         _parse_svg_path = None
         _parse_action = None
         _parse_collection_name = None
+    return None
+
+
+def _set_zozo_status(message: str) -> None:
+    if _zozo_scene_name:
+        scene = bpy.data.scenes.get(_zozo_scene_name)
+        if scene is not None and hasattr(scene, "yohsai"):
+            scene.yohsai.parse_status = message
+
+
+def _poll_zozo_mcp() -> float | None:
+    global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
+    process = _zozo_process
+    if process is None:
+        return None
+    if process.poll() is None:
+        return 0.2
+
+    stdout, stderr = process.communicate()
+    summary = _zozo_prepared_summary or "Prepared the ZOZO hand-off mesh"
+    try:
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        result = json.loads(lines[-1]) if lines else {}
+        if process.returncode != 0 or result.get("status") != "success":
+            diagnostic = str(result.get("message") or stderr.strip() or "ZOZO MCP setup failed.")
+            _set_zozo_status(
+                f"{summary}; start ZOZO MCP on :{ZOZO_MCP_PORT} and Prepare again: {diagnostic[:150]}"
+            )
+        else:
+            capture = str(result.get("capture", "not needed"))
+            _set_zozo_status(f"{summary}; ZOZO MCP ready ({capture}). Use Transfer, then Run Simulation.")
+    except Exception as exc:
+        diagnostic = stderr.strip() or stdout.strip() or str(exc)
+        _set_zozo_status(f"{summary}; ZOZO MCP response failed: {diagnostic[:170]}")
+    finally:
+        _zozo_process = None
+        _zozo_scene_name = None
+        _zozo_prepared_summary = None
     return None
 
 
@@ -489,6 +533,79 @@ class YOHSAI_OT_kitsuke(Operator):
         return _run_gravity(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED)
 
 
+class YOHSAI_OT_prepare_zozo(Operator):
+    bl_idname = "yohsai.prepare_zozo"
+    bl_label = "Prepare for ZOZO"
+    bl_description = (
+        "Create solver-owned cloth and animated Body copies, then configure "
+        f"ZOZO Contact Solver through its MCP server on port {ZOZO_MCP_PORT}"
+    )
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def execute(self, context):
+        global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
+        props = context.scene.yohsai
+        if _zozo_process is not None and _zozo_process.poll() is None:
+            self.report({"WARNING"}, "ZOZO MCP configuration is already running.")
+            return {"CANCELLED"}
+        try:
+            prepared = prepare_for_zozo(
+                context,
+                props.clothes_collection,
+                props.body_object,
+            )
+        except ZozoHandoffError as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Prepare for ZOZO failed: {message[:220]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Prepare for ZOZO failed: {message[:220]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        summary = (
+            f"Prepared {prepared.seam_count} ZOZO stitches "
+            f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm)"
+        )
+        try:
+            config_path = Path(_parser_data_dir()) / _ZOZO_CONFIG_FILENAME
+            config_path.write_text(
+                json.dumps(prepared.mcp_configuration(context.scene), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            client_path = Path(__file__).with_name(_ZOZO_CLIENT_FILENAME)
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            _zozo_process = subprocess.Popen(
+                [_bundled_python(), str(client_path), str(config_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+                env=_parser_environment(),
+            )
+            _zozo_scene_name = context.scene.name
+            _zozo_prepared_summary = summary
+            props.parse_status = f"{summary}; configuring ZOZO MCP on :{ZOZO_MCP_PORT}..."
+            if not bpy.app.timers.is_registered(_poll_zozo_mcp):
+                bpy.app.timers.register(_poll_zozo_mcp, first_interval=0.2)
+            self.report({"INFO"}, f"{summary}; configuring ZOZO.")
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = (
+                f"{summary}; copies are ready, but MCP could not start: {message[:160]}"
+            )
+            self.report({"WARNING"}, props.parse_status)
+        return {"FINISHED"}
+
+
 class YOHSAI_PT_main(Panel):
     bl_idname = "YOHSAI_PT_main"
     bl_label = "Yohsai"
@@ -516,6 +633,7 @@ class YOHSAI_PT_main(Panel):
         gravity_actions = actions.row(align=True)
         gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
         gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal GRAVITY")
+        actions.operator(YOHSAI_OT_prepare_zozo.bl_idname, text="Prepare for ZOZO")
         layout.label(text=props.parse_status)
 
 
@@ -525,6 +643,7 @@ _classes = (
     YOHSAI_OT_update_svg,
     YOHSAI_OT_kitsuke_zero_gravity,
     YOHSAI_OT_kitsuke,
+    YOHSAI_OT_prepare_zozo,
     YOHSAI_PT_main,
 )
 
@@ -537,10 +656,18 @@ def register():
 
 
 def unregister():
+    global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
     _unregister_history_handlers()
     reset_runtime_epoch()
     if bpy.app.timers.is_registered(_poll_svg_parser):
         bpy.app.timers.unregister(_poll_svg_parser)
+    if bpy.app.timers.is_registered(_poll_zozo_mcp):
+        bpy.app.timers.unregister(_poll_zozo_mcp)
+    if _zozo_process is not None and _zozo_process.poll() is None:
+        _zozo_process.terminate()
+    _zozo_process = None
+    _zozo_scene_name = None
+    _zozo_prepared_summary = None
     del bpy.types.Scene.yohsai
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

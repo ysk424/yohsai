@@ -66,6 +66,8 @@ class _BodySnapshot:
     faces: np.ndarray
     bvh: BVHTree
     ray_distance: float
+    bounds_minimum: np.ndarray
+    bounds_maximum: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -203,9 +205,23 @@ def _sewn_preview(collection: bpy.types.Collection) -> bpy.types.Object | None:
     return previews[0] if previews else None
 
 
+def _mesh_local_vertices(mesh: bpy.types.Mesh) -> np.ndarray:
+    """Read mesh coordinates through Blender's bulk collection API."""
+    result = np.empty((len(mesh.vertices), 3), dtype=np.float32)
+    mesh.vertices.foreach_get("co", result.ravel())
+    return result
+
+
+def _transform_points(points: np.ndarray, matrix: Matrix) -> np.ndarray:
+    """Apply one affine Blender matrix to a contiguous point block."""
+    transform = np.asarray([tuple(row) for row in matrix], dtype=np.float32)
+    transformed = np.asarray(points, dtype=np.float32) @ transform[:3, :3].T
+    transformed += transform[:3, 3]
+    return np.ascontiguousarray(transformed, dtype=np.float32)
+
+
 def _world_vertices(obj: bpy.types.Object) -> np.ndarray:
-    matrix = obj.matrix_world
-    return np.asarray([tuple(matrix @ vertex.co) for vertex in obj.data.vertices], dtype=np.float32)
+    return _transform_points(_mesh_local_vertices(obj.data), obj.matrix_world)
 
 
 def _cloth_topology(parts: list[_PartRange]) -> _ClothTopology:
@@ -395,7 +411,7 @@ def _body_snapshot(context, body: bpy.types.Object) -> _BodySnapshot:
     try:
         mesh.calc_loop_triangles()
         matrix = evaluated.matrix_world
-        vertices = np.asarray([tuple(matrix @ vertex.co) for vertex in mesh.vertices], dtype=np.float32)
+        vertices = _transform_points(_mesh_local_vertices(mesh), matrix)
         faces = np.asarray([triangle.vertices[:] for triangle in mesh.loop_triangles], dtype=np.int32)
         # A reflected Object/parent transform reverses geometric winding after
         # vertices enter world space. Preserve the mesh's authored outward side
@@ -412,7 +428,14 @@ def _body_snapshot(context, body: bpy.types.Object) -> _BodySnapshot:
         all_triangles=True,
     )
     diagonal = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
-    return _BodySnapshot(vertices, faces, bvh, max(diagonal * 2.0, 1.0))
+    return _BodySnapshot(
+        vertices,
+        faces,
+        bvh,
+        max(diagonal * 2.0, 1.0),
+        vertices.min(axis=0),
+        vertices.max(axis=0),
+    )
 
 
 _PARITY_DIRECTIONS = tuple(
@@ -445,10 +468,27 @@ def _inside_body(body: _BodySnapshot, point: np.ndarray) -> bool:
     return odd_votes >= 2
 
 
-def _body_collision_candidates(positions: np.ndarray, body: _BodySnapshot) -> np.ndarray:
+def _body_collision_candidates(
+    positions: np.ndarray,
+    body: _BodySnapshot,
+    eligible: np.ndarray | None = None,
+) -> np.ndarray:
     """Return the nearest Body triangle for nearby or penetrating cloth vertices."""
     pairs: list[tuple[int, int]] = []
-    for vertex_index, point in enumerate(positions):
+    # Keep the broad phase conservative at the float32 boundary: it may admit a
+    # point just beyond the exact search distance, but must never reject one the
+    # BVH would accept.
+    bounds_padding = COLLISION_SEARCH_M + 1.0e-6
+    expanded_minimum = body.bounds_minimum - bounds_padding
+    expanded_maximum = body.bounds_maximum + bounds_padding
+    candidate_mask = np.all(
+        (positions >= expanded_minimum) & (positions <= expanded_maximum),
+        axis=1,
+    )
+    if eligible is not None:
+        candidate_mask &= eligible
+    for vertex_index in np.flatnonzero(candidate_mask):
+        point = positions[vertex_index]
         _location, _normal, face_index, _distance = body.bvh.find_nearest(
             Vector(tuple(float(value) for value in point)), COLLISION_SEARCH_M
         )
@@ -464,10 +504,7 @@ def _body_collision_candidates(positions: np.ndarray, body: _BodySnapshot) -> np
 
 
 def _unlocked_body_collision_candidates(positions: np.ndarray, body: _BodySnapshot, locked: np.ndarray) -> np.ndarray:
-    pairs = _body_collision_candidates(positions, body)
-    if not len(pairs):
-        return pairs
-    return pairs[locked[pairs[:, 0]] == 0]
+    return _body_collision_candidates(positions, body, locked == 0)
 
 
 class _KitsukeSession:
@@ -563,8 +600,8 @@ class _KitsukeSession:
             obj = part.obj
             inverse = obj.matrix_world.inverted_safe()
             selection = self.positions[part.start : part.start + part.count]
-            for vertex, world_position in zip(obj.data.vertices, selection):
-                vertex.co = inverse @ Vector(tuple(float(value) for value in world_position))
+            local_positions = _transform_points(selection, inverse)
+            obj.data.vertices.foreach_set("co", local_positions.ravel())
             obj.data.update()
             self.positions[part.start : part.start + part.count] = _world_vertices(obj)
             obj.hide_set(False)
@@ -711,6 +748,34 @@ def completed_kitsuke_parts(collection: bpy.types.Collection | None) -> list[bpy
     names = [str(name) for name in collection.get(_STATE_PARTS_KEY, [])]
     parts = {obj.name: obj for obj in _parts(collection)}
     return [parts[name] for name in names if name in parts]
+
+
+def completed_kitsuke_handoff(
+    collection: bpy.types.Collection | None,
+) -> tuple[list[bpy.types.Object], np.ndarray]:
+    """Return the ordered parts and sewing pairs from the last completed step.
+
+    Solver hand-off code must use the exact vertex ordering persisted by
+    Kitsuke.  Rebuilding a sewing plan here could silently choose a different
+    path after the user has moved a completed panel.
+    """
+    parts = completed_kitsuke_parts(collection)
+    if collection is None or len(parts) < 2:
+        raise KitsukeError(
+            "Prepare needs a completed GRAVITY step with at least two sewn parts."
+        )
+    expected_names = [str(name) for name in collection.get(_STATE_PARTS_KEY, [])]
+    if [part.name for part in parts] != expected_names:
+        raise KitsukeError(
+            "A part from the completed GRAVITY step is missing; press GRAVITY again before Prepare."
+        )
+    vertex_count = sum(len(part.data.vertices) for part in parts)
+    session = _sessions.get(collection.as_pointer())
+    if session is not None and session.revision > 0:
+        seams = np.asarray(session.seams, dtype=np.int32).copy()
+    else:
+        seams = _read_persisted_seams(collection, vertex_count).copy()
+    return parts, seams
 
 
 def has_kitsuke_session(collection: bpy.types.Collection | None) -> bool:

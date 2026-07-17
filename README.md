@@ -24,6 +24,8 @@ The normal operation order is:
    Sewing automatically immediately before the simulation.
 4. Continue placement and use either GRAVITY button in any order.
 5. Use `Update` after editing the same Illustrator PDF.
+6. After the garment is sewn, start the ZOZO MCP server on port 9633 and use
+   `Prepare for ZOZO` to create an animation hand-off.
 
 Every part has two independent attributes: the monotonic `PLACED` -> `PENDING`
 -> `DONE` state and one deformation Lock. Moving a `PLACED` part makes it
@@ -42,6 +44,9 @@ The Auto control is a colored toggle whose pressed state shows that it is on.
 
 The parser accepts a one-page Illustrator PDF. Each closed panel must contain a
 unique `#` label. Page vertical is warp and page horizontal is weft.
+Illustrator layer and sublayer names are ignored; standard PDF page content is
+read as one flattened drawing. A PDF text object whose first non-whitespace
+characters are `//` is a comment and is ignored in full.
 
 Supported annotations are:
 
@@ -109,6 +114,34 @@ Undo and Redo store the solver state needed to reconstruct the live session
 inside the same add-on runtime. Continuing a partially dressed session after
 restarting Blender is unsupported.
 
+## Prepare for ZOZO
+
+`Prepare for ZOZO` is available after at least one completed GRAVITY step. It
+does not modify, join, rename, hide, or move the source Yohsai parts. It creates
+a dedicated cloth copy with one active `Yohsai Pattern` UV map, loose stitch
+edges, and a dedicated Body collider copy that retains the Body's modifiers,
+parent, shape keys, and animation links.
+
+ZOZO cannot start with two contact surfaces exactly coincident. On the copy
+only, each loose stitch is opened to at least 2.21 mm: 1.1 times the two 1 mm
+contact gaps plus 0.01 mm. A seam still more than 10 mm open is rejected; use
+Zero GRAVITY to close it first. The original completed garment remains the
+authoritative Yohsai state.
+
+The button configures ZOZO Contact Solver through its localhost MCP endpoint at
+`http://localhost:9633/mcp`. It replaces only the two groups named for the
+selected Yohsai collection, creates a SHELL and STATIC group, uses absolute 1
+mm contact gaps, preserves the initial fitted shape as the bending rest shape,
+and sets conservative damping and five inactive-momentum frames. If the Body
+copy deforms through an Armature, Lattice, Mesh Deform, shape keys, or drivers,
+the MCP client also records its deformation cache.
+
+MCP setup runs outside Blender's main thread so ZOZO can safely execute its
+queued Blender operations. If the MCP server is stopped, the hand-off copies
+remain valid: start ZOZO MCP on port 9633 and press Prepare again. Yohsai never
+starts Transfer or the simulation automatically; inspect the groups, then use
+ZOZO's `Transfer` and `Run Simulation` controls.
+
 ## Update
 
 Update rereads the same PDF and recuts the selected Clothes collection. Stable
@@ -131,6 +164,7 @@ Character silhouettes are exported separately with
 - `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
 - `COSSERAT_DESIGN.md`: native particle solver and compatibility boundary;
 - `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
+- `XPBD_HANDOFF_DESIGN.md`: Blender 5.2 experimental cloth compatibility plan;
 - `SESSION_MEMORY.md`: concise current handoff.
 
 ## Native development

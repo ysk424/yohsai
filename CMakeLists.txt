@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-project(yohsai_cosserat VERSION 0.6.4 LANGUAGES CXX)
+project(yohsai_cosserat VERSION 0.6.5 LANGUAGES CXX)
 
 include(CTest)
 add_subdirectory(native)
