@@ -274,7 +274,6 @@ def _resolve_self_intersections(
             adjacency[a].append(b); seen[a].add(b)
         if a not in seen[b]:
             adjacency[b].append(a); seen[b].add(a)
-    bm.free()
 
     def involved_vertices(current: np.ndarray) -> set[int]:
         # ppf detects real intersections (edge-vs-triangle plus a coplanar
@@ -332,10 +331,19 @@ def _resolve_self_intersections(
         if location is not None and (Vector(coords[index]) - location).dot(normal) < 0.0:
             coords[index] = np.array(location + normal * _BODY_CLEARANCE_M)
 
-    for index, vertex in enumerate(mesh.vertices):
-        vertex.co = inverse @ Vector(coords[index])
+    # Persist the resolved positions AND the triangulation: ppf triangulates any
+    # remaining quads with its own diagonal, which can re-introduce an
+    # intersection the resolver already cleared on its triangulation.  Writing
+    # the triangulated mesh back hands ppf exactly the triangles that were
+    # verified intersection-free.
+    remaining = len(involved_vertices(coords))
+    bm.verts.ensure_lookup_table()
+    for index in range(len(coords)):
+        bm.verts[index].co = inverse @ Vector(coords[index])
+    bm.to_mesh(mesh)
+    bm.free()
     mesh.update()
-    return len(involved_vertices(coords))
+    return remaining
 
 
 def _pattern_positions(obj: bpy.types.Object) -> list[tuple[float, float]]:

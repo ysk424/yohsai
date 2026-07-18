@@ -117,6 +117,12 @@ its surface plus the body clearance.  ppf then re-sews the loose stitches and
 re-drapes the smoothed region with contact, which re-forms the gathers without
 re-creating the self-intersection.
 
+The resolved mesh is handed off **already triangulated**.  The cloth still
+carries grain quads, and ppf triangulates any quad with its own diagonal, which
+can re-introduce an intersection the resolver already cleared on the opposite
+diagonal.  Persisting the resolver's triangulation gives ppf exactly the
+triangles that were verified intersection-free.
+
 On the reference garment this took the hand-off shell from 526 self-intersections
 to 0 in under a second, with no body penetration and the 1:1 seams intact.  The
 smoothing is method one; the body clamp is the fallback method two for any fold
