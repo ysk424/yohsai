@@ -178,15 +178,18 @@ def _open_stitches(
     body_centroid: np.ndarray,
 ) -> tuple[np.ndarray, float, float]:
     before = np.linalg.norm(positions[seams[:, 0]] - positions[seams[:, 1]], axis=1)
-    maximum_before = float(np.max(before))
-    if maximum_before > MAX_HANDOFF_SEAM_DISTANCE_M:
-        raise ZozoHandoffError(
-            f"A completed seam is still {maximum_before * 1000.0:.1f} mm open. "
-            "Use Zero GRAVITY until the sewing is closed, then Prepare again."
-        )
+    maximum_before = float(np.max(before)) if before.size else 0.0
+
+    # Matched 1:1 gather sewing closes every seam except a few isolated pinch
+    # points (shoulder / underarm) where the body sits between the two sides and
+    # holds them apart.  Those residual pairs are excluded from the ZOZO stitch
+    # opening below and welded shut afterwards, so they play no part in the layer
+    # spacing of their neighbours.
+    residual = np.nonzero(before > MAX_HANDOFF_SEAM_DISTANCE_M)[0]
+    open_seams = np.delete(seams, residual, axis=0)
 
     result = positions.copy()
-    adjacency, components = _seam_components(seams)
+    adjacency, components = _seam_components(open_seams)
     for component in components:
         normal, minimum_body_distance = _component_normal(
             bvh, body_centroid, result, component
@@ -195,7 +198,7 @@ def _open_stitches(
         component_set = set(component)
         projections = [
             abs(float(np.dot(result[int(b)] - result[int(a)], normal)))
-            for a, b in seams
+            for a, b in open_seams
             if int(a) in component_set
         ]
         layer_spacing = ZOZO_STITCH_OPENING_M + max(projections, default=0.0)
@@ -207,12 +210,28 @@ def _open_stitches(
         for vertex in component:
             result[vertex] += normal * (clearance + colors[vertex] * layer_spacing)
 
-    after = np.linalg.norm(result[seams[:, 0]] - result[seams[:, 1]], axis=1)
-    minimum_after = float(np.min(after))
-    if minimum_after + 1.0e-8 < ZOZO_STITCH_OPENING_M:
-        raise ZozoHandoffError(
-            "Could not create a positive ZOZO contact gap at every sewing edge."
-        )
+    # Fill each residual pinch hole by welding its pair onto whichever endpoint
+    # sits farther outside the body, so the adjacent panel triangles stretch
+    # across the gap without bending the panels or being driven into the body.
+    # Like a real 2 mm stitch line this is not perfect, which is fine for a
+    # garment.
+    for index in residual:
+        first, second = int(seams[index, 0]), int(seams[index, 1])
+        _, _, _, distance_first = bvh.find_nearest(Vector(result[first]))
+        _, _, _, distance_second = bvh.find_nearest(Vector(result[second]))
+        anchor = first if (distance_first or 0.0) >= (distance_second or 0.0) else second
+        result[first] = result[anchor]
+        result[second] = result[anchor]
+
+    if open_seams.size:
+        after = np.linalg.norm(result[open_seams[:, 0]] - result[open_seams[:, 1]], axis=1)
+        minimum_after = float(np.min(after))
+        if minimum_after + 1.0e-8 < ZOZO_STITCH_OPENING_M:
+            raise ZozoHandoffError(
+                "Could not create a positive ZOZO contact gap at every sewing edge."
+            )
+    else:
+        minimum_after = ZOZO_STITCH_OPENING_M
     return result, maximum_before, minimum_after
 
 

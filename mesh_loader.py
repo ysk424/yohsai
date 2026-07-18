@@ -264,11 +264,22 @@ def _reverse_loop(points: list[Vector], metadata: list[EdgeMeta]) -> tuple[list[
 
 
 def _panel_outline(
-    panel: dict[str, Any], spacing: float
+    panel: dict[str, Any], spacing: float, seam_counts: dict[str, int] | None = None
 ) -> tuple[list[Vector], list[EdgeMeta], list[Vector]]:
     segments = panel.get("segments")
     if not isinstance(segments, list) or len(segments) < 3:
         raise MeshLoadError(f"Panel {panel.get('id')!r} needs at least three segments.")
+
+    def _forced_count(segment: dict[str, Any], default_count: int | None) -> int | None:
+        # A sewing-group segment is resampled to the matched count shared with
+        # its partner edge so the two seam boundaries carry equal, uniformly
+        # spaced vertices and pair 1:1 (the gather is absorbed as the longer
+        # edge bunches between its matched vertices).
+        if seam_counts:
+            meta = _segment_meta(segment)
+            if meta.sewing_group and meta.sewing_group in seam_counts:
+                return seam_counts[meta.sewing_group]
+        return default_count
     fold_indices = [index for index, segment in enumerate(segments) if bool(segment.get("fold", False))]
     ring_indices = [index for index, segment in enumerate(segments) if bool(segment.get("ring", False))]
     if len(fold_indices) > 1:
@@ -288,8 +299,9 @@ def _panel_outline(
         points: list[Vector] = []
         metadata: list[EdgeMeta] = []
         for segment_index, segment in enumerate(segments):
+            default_count = ring_count if segment_index in ring_indices else None
             sampled, sampled_meta = _sample_segment(
-                segment, spacing, ring_count if segment_index in ring_indices else None
+                segment, spacing, _forced_count(segment, default_count)
             )
             if not points:
                 points.extend(sampled)
@@ -319,7 +331,7 @@ def _panel_outline(
     nonfold_metadata: list[EdgeMeta] = []
     for offset in range(1, len(segments)):
         segment = segments[(fold_index + offset) % len(segments)]
-        sampled, sampled_meta = _sample_segment(segment, spacing)
+        sampled, sampled_meta = _sample_segment(segment, spacing, _forced_count(segment, None))
         if _distance(nonfold_points[-1], sampled[0]) > 1.0e-8:
             raise MeshLoadError(f"Panel {panel.get('id')!r} segments are not continuous.")
         nonfold_points.extend(sampled[1:])
@@ -681,10 +693,10 @@ def _weld_ring(
 
 
 def _triangulate_panel(
-    panel: dict[str, Any], spacing: float, mirror_side: str = ""
+    panel: dict[str, Any], spacing: float, mirror_side: str = "", seam_counts: dict[str, int] | None = None
 ) -> PanelGeometry:
     panel_id = str(panel.get("id", "panel"))
-    outline, outline_meta, fold_points = _panel_outline(panel, spacing)
+    outline, outline_meta, fold_points = _panel_outline(panel, spacing, seam_counts)
     if len(outline) < 3 or abs(_signed_area(outline)) <= 1.0e-12:
         raise MeshLoadError(f"Panel {panel_id!r} has a degenerate expanded outline.")
 
@@ -811,14 +823,19 @@ def _triangulate_panel(
     )
 
 
-def _panel_geometries(panels: list[dict[str, Any]], spacing: float) -> list[PanelGeometry]:
+def _panel_geometries(
+    panels: list[dict[str, Any]],
+    spacing: float,
+    seam_counts_by_panel: dict[str, dict[str, int]] | None = None,
+) -> list[PanelGeometry]:
     result: list[PanelGeometry] = []
     for panel in panels:
+        seam_counts = (seam_counts_by_panel or {}).get(str(panel.get("id", "")))
         if bool(panel.get("mirror", False)):
-            result.append(_triangulate_panel(panel, spacing, "LEFT"))
-            result.append(_triangulate_panel(panel, spacing, "RIGHT"))
+            result.append(_triangulate_panel(panel, spacing, "LEFT", seam_counts))
+            result.append(_triangulate_panel(panel, spacing, "RIGHT", seam_counts))
         else:
-            result.append(_triangulate_panel(panel, spacing))
+            result.append(_triangulate_panel(panel, spacing, seam_counts=seam_counts))
     return result
 
 
@@ -1005,6 +1022,7 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
         collection["yohsai_source_svg"] = str(source.get("svg_path", ""))
         collection["yohsai_sewing_signature"] = _sewing_signature(document)
         collection["yohsai_sewing_verified"] = False
+        _store_document(collection, document)
         context.view_layer.update()
         for obj in created_objects:
             obj[LOAD_MATRIX_KEY] = list(_matrix_tuple(obj.matrix_world))
@@ -1210,6 +1228,7 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
     collection["yohsai_sewing_signature"] = new_signature
     if sewing_changed:
         collection["yohsai_sewing_verified"] = False
+    _store_document(collection, document)
     context.view_layer.update()
     return sewing_changed, sum(len(obj.data.vertices) for obj in parts)
 
@@ -1369,6 +1388,11 @@ def _ordered_vertex_pairs(left: _SeamChain, right: _SeamChain, label: str) -> li
         right_points = tuple(reversed(right_points))
         right_lengths = tuple(reversed(right_lengths))
 
+    if len(left.vertices) == len(right_vertices):
+        # Matched counts pair 1:1 by index once oriented, so the longer edge
+        # gathers between its matched vertices instead of splaying into a ladder.
+        return list(zip(left.vertices, right_vertices))
+
     left_positions = _cumulative_positions(left.edge_lengths, len(left.vertices))
     right_positions = _cumulative_positions(right_lengths, len(right_vertices))
     pairs = [(left.vertices[0], right_vertices[0])]
@@ -1452,6 +1476,11 @@ def _reorder_closed_path(path: _GlobalSeamPath, order: list[int]) -> _GlobalSeam
 
 
 def _normalized_closed_pairs(left: _GlobalSeamPath, right: _GlobalSeamPath) -> list[tuple[int, int]]:
+    if len(left.vertices) == len(right.vertices):
+        # Matched counts pair 1:1 by index; _circular_alignment rotates and
+        # reflects ``right`` first, so the chosen ordering is the best offset and
+        # this avoids the arc-length merge-walk splaying equal loops into a ladder.
+        return [(left.vertices[index], right.vertices[index]) for index in range(len(left.vertices))]
     left_positions = _cumulative_positions(left.edge_lengths, len(left.vertices), True)
     right_positions = _cumulative_positions(right.edge_lengths, len(right.vertices), True)
     pairs = [(left.vertices[0], right.vertices[0])]
@@ -1642,6 +1671,197 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
             "The pending parts and their completed sewing anchors contain no resolvable sewing group yet."
         )
     return SewingPlan(parts, tuple(resolved_labels), tuple(connections))
+
+
+def compute_seam_count_overrides(
+    collection: bpy.types.Collection,
+) -> dict[str, dict[str, int]]:
+    """Return per-panel ``{label: forced edge count}`` that equalize each sewing
+    seam's two sides so their boundaries carry matching, uniformly spaced
+    vertices and pair 1:1 (the longer edge then gathers between its matched
+    vertices).
+
+    The longer side is kept and the shorter side is resampled up to match it.
+    For an armhole the sleeve is a closed ring while the body armhole is the
+    composite of the front and back open chains, so the ring's vertex budget is
+    shared across the body panels in proportion to their arc lengths.  Panels
+    whose sides already match are omitted, which keeps the pass idempotent.
+    """
+    parts = tuple(
+        obj for obj in collection.objects
+        if obj.type == "MESH" and obj.get("yohsai_role") == "part"
+    )
+    if len(parts) < 2:
+        return {}
+    labels: set[str] = set()
+    for obj in parts:
+        labels |= _sewing_labels(obj.data)
+
+    overrides: dict[str, dict[str, int]] = {}
+
+    def _panel_id(obj: bpy.types.Object) -> str:
+        return str(obj.get("yohsai_panel_id", obj.name))
+
+    def _add(pid: str, label: str, edges: int) -> None:
+        if edges >= 1:
+            overrides.setdefault(pid, {})[label] = edges
+
+    def _rep_length(chains: list[_SeamChain]) -> float:
+        # Symmetric mirror/fold instances share a length; average them.
+        return sum(sum(chain.edge_lengths) for chain in chains) / len(chains)
+
+    def _rep_verts(chains: list[_SeamChain]) -> int:
+        return max(len(chain.vertices) for chain in chains)
+
+    for label in sorted(labels):
+        by_obj: dict[bpy.types.Object, list[_SeamChain]] = {}
+        for obj in parts:
+            chains = _seam_chains(obj, label)
+            if chains:
+                by_obj[obj] = chains
+        if len(by_obj) < 2:
+            continue
+        closed_objs = {
+            obj: chains for obj, chains in by_obj.items()
+            if any(chain.closed for chain in chains)
+        }
+        open_objs = {
+            obj: [chain for chain in chains if not chain.closed]
+            for obj, chains in by_obj.items()
+            if any(not chain.closed for chain in chains)
+        }
+
+        if closed_objs:
+            # Ring-composite armhole: closed sleeve ring <-> composite body loop.
+            target = max(_rep_verts(chains) for chains in closed_objs.values())
+            if not open_objs:
+                continue
+            current = sum(_rep_verts(chains) for chains in open_objs.values())
+            if current >= target:
+                continue
+            lengths = {obj: _rep_length(chains) for obj, chains in open_objs.items()}
+            total = sum(lengths.values())
+            if total <= 0.0:
+                continue
+            count = len(open_objs)
+            budget = target - count  # composite verts = sum(edges_i + 1) = target
+            raw = {obj: budget * lengths[obj] / total for obj in open_objs}
+            edges = {obj: int(math.floor(value)) for obj, value in raw.items()}
+            remainder = budget - sum(edges.values())
+            order = sorted(open_objs, key=lambda obj: raw[obj] - edges[obj], reverse=True)
+            for index in range(max(0, remainder)):
+                edges[order[index % count]] += 1
+            for obj in open_objs:
+                _add(_panel_id(obj), label, edges[obj])
+        else:
+            # Direct open <-> open seam on exactly two panels.
+            if len(open_objs) != 2:
+                continue
+            verts = {obj: _rep_verts(chains) for obj, chains in open_objs.items()}
+            target = max(verts.values())
+            for obj, value in verts.items():
+                if value < target:
+                    _add(_panel_id(obj), label, target - 1)
+    return overrides
+
+
+_DOCUMENT_PROPERTY = "yohsai_document_json"
+
+
+def _store_document(collection: bpy.types.Collection, document: dict[str, Any]) -> None:
+    """Persist the parsed pattern on the collection so seams can be recut later
+    without the source PDF or its external parser."""
+    try:
+        collection[_DOCUMENT_PROPERTY] = json.dumps(document, separators=(",", ":"))
+    except (TypeError, ValueError):
+        pass
+
+
+def _stored_document(collection: bpy.types.Collection) -> dict[str, Any] | None:
+    raw = collection.get(_DOCUMENT_PROPERTY)
+    if not raw:
+        return None
+    try:
+        document = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def remesh_with_seam_counts(
+    context,
+    collection: bpy.types.Collection,
+    overrides: dict[str, dict[str, int]] | None = None,
+) -> set[str]:
+    """Recut only the panels whose sewing seams need matching vertex counts,
+    transferring their current pose onto the new topology.  Returns the set of
+    changed part object names (empty when nothing needed adapting)."""
+    if collection is None or collection.get("yohsai_role") != "clothes":
+        raise UpdateError("No loaded Yohsai clothes collection is selected.")
+    if overrides is None:
+        overrides = compute_seam_count_overrides(collection)
+    if not overrides:
+        return set()
+    document = _stored_document(collection)
+    if document is None:
+        raise UpdateError(
+            "This clothes collection has no stored pattern; press Update once to "
+            "recut it from the saved PDF, then run GRAVITY again."
+        )
+    panels_json = document.get("panels")
+    if not isinstance(panels_json, list) or not panels_json:
+        raise UpdateError("The stored pattern has no panels.")
+    parts = sorted(
+        (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
+        key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
+    )
+    panels = _panel_geometries(panels_json, MESH_SPACING_M, overrides)
+    if len(parts) != len(panels):
+        raise UpdateError(f"Stored panel count {len(panels)} does not match {len(parts)} parts.")
+    old_by_instance = {
+        str(obj.get("yohsai_panel_instance", obj.get("yohsai_panel_label", ""))): obj
+        for obj in parts
+    }
+    new_by_instance = {panel.instance_id: panel for panel in panels}
+    if set(old_by_instance) != set(new_by_instance):
+        raise UpdateError("The stored pattern no longer matches the current parts; press Update first.")
+
+    prepared: list[tuple[bpy.types.Object, bpy.types.Mesh]] = []
+    try:
+        for instance_id, obj in old_by_instance.items():
+            panel = new_by_instance[instance_id]
+            if len(panel.vertices) == len(obj.data.vertices):
+                continue  # unchanged topology keeps its current drape as-is
+            world_positions = _transfer_deformation(obj, panel)
+            inverse = obj.matrix_world.inverted_safe()
+            local_positions = [inverse @ point for point in world_positions]
+            mesh = bpy.data.meshes.new(f"{obj.name}_ADAPT")
+            mesh.from_pydata(local_positions, panel.edges, panel.faces)
+            mesh.validate(verbose=False, clean_customdata=False)
+            mesh.update(calc_edges=True, calc_edges_loose=True)
+            _write_panel_mesh_attributes(mesh, panel, int(obj.get("yohsai_panel_index", 0)))
+            for material in obj.data.materials:
+                mesh.materials.append(material)
+            prepared.append((obj, mesh))
+    except Exception:
+        for _obj, mesh in prepared:
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        raise
+
+    changed: set[str] = set()
+    old_meshes: list[bpy.types.Mesh] = []
+    for obj, mesh in prepared:
+        old_meshes.append(obj.data)
+        obj.data = mesh
+        changed.add(obj.name)
+    if changed:
+        remove_sewn_preview(collection)
+    for mesh in old_meshes:
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+    context.view_layer.update()
+    return changed
 
 
 def create_sewn_mesh(

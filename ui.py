@@ -21,6 +21,7 @@ from .kitsuke import (
     NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
     SOLVER_ITERATIONS,
     ZERO_GRAVITY_M_PER_SECOND_SQUARED,
+    adapt_seam_counts,
     advance_kitsuke,
     clear_kitsuke_session,
     clear_sessions,
@@ -467,6 +468,12 @@ def _run_gravity(operator: Operator, context, gravity_magnitude: float):
             raise KitsukeError("No loaded Yohsai clothes collection is selected.")
         if props.body_object is None:
             raise KitsukeError("Select a mesh Body before pressing GRAVITY.")
+
+        # Gather seams: recut any sewing seam whose two sides carry unequal
+        # vertex counts so they can pair 1:1.  This changes topology on the
+        # affected panels, so force a sewing rebuild below.
+        if adapt_seam_counts(context, collection):
+            collection["yohsai_sewing_verified"] = False
 
         pending_parts = mark_moved_parts_pending(collection)
         sewing_required = bool(pending_parts) or (

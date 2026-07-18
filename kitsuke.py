@@ -22,7 +22,9 @@ from .mesh_loader import (
     LOCKED_OBJECT_KEY,
     SewingError,
     build_sewing_plan,
+    compute_seam_count_overrides,
     participating_parts,
+    remesh_with_seam_counts,
 )
 
 
@@ -734,6 +736,25 @@ def clear_kitsuke_session(collection: bpy.types.Collection | None) -> None:
             if close is not None:
                 close()
         _clear_persisted_state(collection)
+
+
+def adapt_seam_counts(context, collection: bpy.types.Collection | None) -> set[str]:
+    """Equalize every sewing seam's two sides to matching vertex counts so they
+    pair 1:1 (the longer edge gathers between its matched vertices).
+
+    Only mismatched panels are recut, and when nothing needs adapting the pass
+    is a no-op.  A recut changes topology, so the now-stale kitsuke session and
+    persisted state are dropped and sewing rebuilds on the new meshes.
+    """
+    if collection is None:
+        return set()
+    overrides = compute_seam_count_overrides(collection)
+    if not overrides:
+        return set()
+    changed = remesh_with_seam_counts(context, collection, overrides)
+    if changed:
+        clear_kitsuke_session(collection)
+    return changed
 
 
 def completed_kitsuke_parts(collection: bpy.types.Collection | None) -> list[bpy.types.Object]:
