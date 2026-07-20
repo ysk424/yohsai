@@ -41,8 +41,8 @@ SVG = """<?xml version="1.0" encoding="UTF-8"?>
 </svg>
 """
 
-
 yohsai = load_source_package(repo)
+finished_garment = sys.modules[f"{yohsai.__name__}.finished_garment"]
 kitsuke = sys.modules[f"{yohsai.__name__}.kitsuke"]
 mesh_loader = sys.modules[f"{yohsai.__name__}.mesh_loader"]
 parser = importlib.import_module(f"{yohsai.__name__}.yohsai_svg_parser")
@@ -183,6 +183,16 @@ try:
             True, True, True, False
         ]
 
-        print("YOHSAI_GRAVITY_STATE_LOCK_OK stages=2,3,4 repeat=ok auto=on/off lock=ok")
+        finished = finished_garment.create_finished_garment(bpy.context, collection)
+        assert finished.object.get("yohsai_role") == "finished_garment"
+        assert finished.face_count == sum(len(part.data.polygons) for part in parts)
+        assert finished.vertex_count < sum(len(part.data.vertices) for part in parts)
+        assert finished.object.parent is None
+        assert finished.object.matrix_world.is_identity
+
+        print(
+            "YOHSAI_GRAVITY_STATE_LOCK_OK stages=2,3,4 repeat=ok auto=on/off "
+            f"lock=ok finished={finished.vertex_count}v/{finished.face_count}f"
+        )
 finally:
     yohsai.unregister()

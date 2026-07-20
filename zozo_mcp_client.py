@@ -64,7 +64,7 @@ class MCPClient:
                 "params": {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "yohsai", "version": "0.7.0"},
+                    "clientInfo": {"name": "yohsai", "version": "0.8.0"},
                 },
             },
             timeout=5.0,

@@ -15,6 +15,7 @@ from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
+from .finished_garment import FinishedGarmentError, create_finished_garment
 from .kitsuke import (
     KitsukeError,
     KITSUKE_BACKEND_STABLE_COSSERAT,
@@ -613,6 +614,51 @@ class YOHSAI_OT_prepare_zozo(Operator):
         return {"FINISHED"}
 
 
+class YOHSAI_OT_finished_garment(Operator):
+    bl_idname = "yohsai.finished_garment"
+    bl_label = "Finished Garment"
+    bl_description = (
+        "Create one portable, rig-independent garment mesh by welding the completed "
+        "sewing seams; the current pose is used as-is"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def execute(self, context):
+        props = context.scene.yohsai
+        try:
+            result = create_finished_garment(context, props.clothes_collection)
+        except FinishedGarmentError as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Finished Garment failed: {message[:220]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Finished Garment failed: {message[:220]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        summary = (
+            f"Finished Garment created: {result.object.name}; "
+            f"{result.vertex_count} vertices, {result.face_count} faces, "
+            f"{result.seam_count} seams welded"
+        )
+        if result.maximum_weld_displacement_m > 0.01:
+            summary += (
+                f"; seams moved up to {result.maximum_weld_displacement_m * 1000.0:.1f} mm"
+                " (continue GRAVITY first if unintended)"
+            )
+        if result.warnings:
+            summary += "; " + "; ".join(result.warnings)
+        props.parse_status = summary[:300]
+        self.report({"WARNING" if result.warnings else "INFO"}, summary)
+        return {"FINISHED"}
+
+
 class YOHSAI_PT_main(Panel):
     bl_idname = "YOHSAI_PT_main"
     bl_label = "Yohsai"
@@ -640,6 +686,7 @@ class YOHSAI_PT_main(Panel):
         gravity_actions = actions.row(align=True)
         gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
         gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal GRAVITY")
+        actions.operator(YOHSAI_OT_finished_garment.bl_idname, text="Finished Garment")
         actions.operator(YOHSAI_OT_prepare_zozo.bl_idname, text="Prepare for ZOZO")
         layout.label(text=props.parse_status)
 
@@ -650,6 +697,7 @@ _classes = (
     YOHSAI_OT_update_svg,
     YOHSAI_OT_kitsuke_zero_gravity,
     YOHSAI_OT_kitsuke,
+    YOHSAI_OT_finished_garment,
     YOHSAI_OT_prepare_zozo,
     YOHSAI_PT_main,
 )

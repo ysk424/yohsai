@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Yohsai pattern loading, automatic sewing, Update, and GRAVITY tools."""
+"""Yohsai pattern construction, dressing, and finished-garment tools."""
 
 from __future__ import annotations
 

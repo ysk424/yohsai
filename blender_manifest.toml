@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.7.7"
+version = "0.8.0"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -29,6 +29,7 @@ paths = [
     "build_native.ps1",
     "ui.py",
     "kitsuke.py",
+    "finished_garment.py",
     "zozo_handoff.py",
     "zozo_mcp_client.py",
     "cosserat_native.py",
@@ -39,6 +40,7 @@ paths = [
     "KITSUKE_DESIGN.md",
     "COSSERAT_DESIGN.md",
     "GRAINLINE_DESIGN.md",
+    "FINISHED_GARMENT_DESIGN.md",
     "XPBD_HANDOFF_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
