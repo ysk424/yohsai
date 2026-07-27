@@ -17,8 +17,8 @@ positions nor material rest state.
 
 ## Free-air dynamics
 
-The external free-air inputs are downward gravity and constant-magnitude seam
-attraction. The cloth distributes the seam load using
+The external free-air inputs are downward gravity and the constant-distance seam
+drag. The cloth distributes the seam load using
 three Body-independent internal terms:
 
 1. authored rest lengths on all non-proxy material edges;
@@ -31,10 +31,14 @@ is no area-to-Body, normal-to-bone, director, silhouette, or shape-matching term
 ## Seam
 
 Every explicit sewing pair has target length zero from runtime creation onward.
-Clicks do not shorten, replace, or ratchet this target. Until capture, the force
-magnitude is constant and only its direction follows the endpoint line; a 50 cm
-and a 5 cm gap therefore receive the same force. At 2 mm, or when the endpoints
-cross during a substep, the pair is captured and held at zero distance.
+Clicks do not shorten, replace, or ratchet this target.
+
+Sewing is not a force. Until capture it is a positional drag applied once per
+substep, ahead of the prediction, so it contributes no momentum; see
+`COSSERAT_DESIGN.md`. The closure is a constant distance and only its direction
+follows the endpoint line, so a 50 cm and a 5 cm gap close at the same rate. At
+2 mm, or when the endpoints cross during a substep, the pair is captured and
+held at zero distance.
 
 ## Gather sewing
 
@@ -142,22 +146,31 @@ Self-contact is absent.
 - substeps per click: 8;
 - gravity per click: either 0 or 9.81 m/s² in world -Z;
 - material/contact iterations: fixed at 20;
-- seam attraction: 300 force units (300 m/s² at unit inverse mass);
+- seam closure: 8 mm per substep, applied once as a position change;
 - seam capture distance: 2 mm;
 - edge stretch relaxation per sweep: 1.0, with four alternating sweeps;
+- crimp reserve before an edge becomes a hard wall: 5% of rest length;
 - quad shear relaxation per iteration: 0.02;
-- axial bend relaxation per iteration: 0.0001;
+- axial bend relaxation per iteration: 0.02;
+- maximum position correction per projection: 5 mm;
 - Body candidate radius: 40 mm;
 - Body contact thickness: 5 mm.
+
+Every value above is `ysc_default_config()` in `native/src/solver.cpp`, except
+the iteration count, which the Blender layer passes per click
+(`SOLVER_ITERATIONS` in `kitsuke.py`), and the candidate radius, which is
+Blender-side broad phase (`COLLISION_SEARCH_M`).
 
 `Zero gravity` advances with no gravitational acceleration. `Normal gravity`
 applies `(0, 0, -9.81)` m/s². Either button can follow the other within the same
 live session without resetting positions, velocities, or seam state. The solver
 is always the native CPU Square-Lattice Cloth backend.
 
-After the coupled material iterations, additional alternating edge/seam sweeps
-converge the strong sewing load into the lattice so a stitch vertex cannot run
-ahead and leave a torn one-edge spike.
+There is no sweep phase after the iteration loop. Each iteration runs seam
+capture, captured seams, quad shear, axial bend, four alternating edge sweeps,
+then Body contact. The edge sweeps repeat inside the iteration, and run last
+among the material terms, so the strong sewing load converges into the lattice
+and a stitch vertex cannot run ahead and leave a torn one-edge spike.
 
 ## Editing and recovery
 

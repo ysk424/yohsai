@@ -12,9 +12,12 @@ then reads the resulting JSON. The converter does not import Blender modules or
 share memory with Blender.
 
 The standalone conversion ends when valid JSON has been produced. Blender then
-creates an initial flat garment mesh from that JSON. Darts, notches, grain lines,
-and advanced sewing rules are outside this schema version. Sections 11 and 12
-define Blender operations that consume the preserved sewing metadata.
+creates an initial flat garment mesh from that JSON. Darts, notches, and advanced
+sewing rules are outside this schema version. Grain is implemented but carries no
+annotation: the page axes define it, so the JSON stores no grainline field and
+Load derives the lattice from page orientation (see `GRAINLINE_DESIGN.md`).
+Sections 11 and 12 define Blender operations that consume the preserved sewing
+metadata.
 
 ## 2. Process contract
 
@@ -84,8 +87,7 @@ points as described in section 3.1:
 ## 5. Coordinates
 
 - Output X increases to the right.
-- Output Y increases upward, so SVG Y coordinates are negated after applying
-  SVG transforms.
+- Output Y increases upward, so PDF page Y is flipped after the page transform.
 - All output coordinates are meters.
 - No panel is translated or packed by the parser.
 - Relative placement between panels in the source document is preserved in
@@ -141,11 +143,12 @@ combined with fold expansion on the same panel.
 
 ## 7. Panel and segment identity
 
-An explicit `#` label is the panel ID. Without a label, if an SVG path has an
-`id`, it is used as the panel name. When one path contains
-multiple closed subpaths, suffixes `_001`, `_002`, and so on are appended. If no
-usable ID exists, deterministic names `panel_001`, `panel_002`, and so on are
-assigned in document order.
+Every closed path first receives a provisional `panel_001`, `panel_002`, ... name
+in document order. A `#` label then replaces that name, so the panel ID of a
+labeled panel is always its normalized label. Unlabeled panels are dropped
+before output, so a provisional name never reaches the JSON. Panel IDs are
+therefore identical to labels in every emitted document, and `source_path_id`
+is always `null` because PDF page content carries no path identifier.
 
 Segments are numbered in authored subpath order, starting at zero. Sewing and
 fold references use the panel ID and segment index.
@@ -174,14 +177,15 @@ The output is UTF-8 JSON with this top-level structure:
 `source.svg_path` is a legacy field name retained for compatibility and stores
 the absolute source path. PDF documents set `source.input_format` to `pdf`.
 
-Each panel has an ID, optional normalized `label`, source path ID, `closed:
-true`, and an ordered `segments` array. A labeled panel begins:
+Each panel has an ID, its normalized `label`, a `source_path_id` that PDF input
+always leaves `null`, `closed: true`, and an ordered `segments` array. A panel
+begins:
 
 ```json
 {
   "id": "FRONT01",
   "label": "FRONT01",
-  "source_path_id": "path123",
+  "source_path_id": null,
   "closed": true,
   "mirror": false,
   "top": null,
@@ -224,8 +228,8 @@ A cubic Bezier segment additionally preserves both controls:
 ```json
 {
   "A": [
-    {"panel": "panel_001", "segment": 4},
-    {"panel": "panel_002", "segment": 7}
+    {"panel": "FRONT01", "segment": 4},
+    {"panel": "BACK01", "segment": 7}
   ]
 }
 ```
@@ -286,10 +290,11 @@ authored mesh dimensions.
 
 ### 10.3 Grain-aligned material mesh and triangulated proxy
 
-Bezier and line boundaries are sampled at no more than approximately `0.005 m`
-between boundary vertices. Yohsai fills the interior from a global 5 mm
+Bezier and line boundaries are sampled at no more than approximately `0.01 m`
+between boundary vertices. Yohsai fills the interior from a global 10 mm
 square grid in pattern-page coordinates: page vertical is warp and page
-horizontal is weft. Complete square cells retain grain metadata. Their two
+horizontal is weft. One constant, `MESH_SPACING_M` in `mesh_loader.py`, sets
+both the boundary sampling pitch and the interior grid pitch. Complete square cells retain grain metadata. Their two
 Blender/collision faces share one proxy diagonal. Arbitrary panel cuts leave a
 narrow triangular transition near the boundary. `Load` does not create loose
 sewing-preview edges, perform Sewing, or add a Blender Cloth modifier.
@@ -358,11 +363,19 @@ compares the two possible directions and uses the direction with the smaller
 endpoint-distance sum. A tied or otherwise ambiguous result is an error and the
 user must move the intended seams closer together.
 
-Vertices are matched monotonically by normalized authored edge distance along
-each ordered path. This preserves ordering and deliberate excess length even
-when paths have different lengths or vertex counts. A longer sleeve therefore
-retains the fabric needed for gathers. The resulting connectivity record uses
-edges that belong to no face.
+Before Sewing runs, every GRAVITY click equalizes each seam's two sides to
+matching vertex counts by recutting the shorter side's panels from the stored
+pattern; only mismatched panels are recut, so the pass is idempotent. Matched
+paths then pair 1:1 by index, and the longer edge gathers between its matched
+vertices. Unequal authored lengths remain the construction data that creates the
+gathers; unequal *vertex counts* do not. `KITSUKE_DESIGN.md` states the gather
+contract and why the mismatched-count case cannot close a seam.
+
+Only when counts still differ does Sewing fall back to a monotonic merge walk
+over normalized authored edge distance. That fallback splays the seam into a
+ladder rather than closing it, so it is a diagnostic path, not the intended one.
+
+The resulting connectivity record uses edges that belong to no face.
 They receive Boolean edge attributes named
 `sewing_spring_<LABEL>`. The original marked boundaries retain
 `sewing_<LABEL>`.
@@ -413,7 +426,7 @@ Gravity choice and fixed material values are runtime behavior rather than
 pattern data and do not alter the JSON contract. The two gravity buttons may be
 alternated during one live session. Material rest data is taken only from the
 pattern mesh; Body data is collision-only. The only product backend is the
-native Windows x64 CPU Square-Lattice library.
+native CPU Square-Lattice library, packaged for Windows x64 and macOS arm64.
 
 ## 13. Update
 
@@ -451,8 +464,8 @@ and completed participants.
 
 ## 14. Future compatibility
 
-Future versions may add darts, notches, grain lines, seam order and direction,
-additional PDF primitives, error-checker interoperability, and richer
-Blender geometry generation. Such additions require a schema-version change or
+Future versions may add darts, notches, an explicit per-panel grain direction,
+seam order and direction, additional PDF primitives, error-checker
+interoperability, and richer Blender geometry generation. Such additions require a schema-version change or
 backward-compatible optional fields. They must not silently reinterpret version
 1 data.

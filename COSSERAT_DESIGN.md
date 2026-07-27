@@ -3,7 +3,9 @@
 Status: current native runtime contract
 
 The DLL name retains `cosserat` for package compatibility. The active runtime is
-a Body-independent square-lattice cloth solver with a version-7 C ABI.
+a Body-independent square-lattice cloth solver with a version-8 C ABI
+(`YSC_API_VERSION` in `c_api.h`, matched by `API_VERSION` in
+`cosserat_native.py`; a mismatch refuses to load).
 
 ## State and topology
 

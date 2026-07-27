@@ -11,6 +11,10 @@ Status: current development state
   parts; completed parts remain available as connectivity anchors. The single
   independent deformation Lock is cleared from all pending parts before Sewing.
 - GRAVITY starts from source-part world vertices.
+- Each GRAVITY click first equalizes every seam's two sides to matching vertex
+  counts, recutting only the shorter side from the pattern stored on the
+  collection. Matched sides pair 1:1 so the longer edge gathers. A recut changes
+  topology and therefore forces a Sewing rebuild.
 - Seam goals are fixed at zero and do not shorten per click.
 - Sewing drags a pair kinematically and contributes no momentum.
 - Pattern edges, square metrics, and axial triples provide cloth internal energy.
@@ -54,6 +58,9 @@ python -m unittest discover -s tests -p "test_*.py"
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The release archive contains current source, documentation, the bundled PDF wheel,
-`bin/yohsai_cosserat.dll`, and `bin/vcomp140.dll`. Build directories, caches,
-temporary files, local PDFs, and earlier ZIPs are excluded.
+`blender_manifest.toml` `[build] paths` is the authoritative file list: current
+source, documentation, `bin/yohsai_cosserat.dll`, `bin/vcomp140.dll`, and
+`bin/libyohsai_cosserat.dylib`. Wheels come from the separate `wheels` key.
+Build directories, caches, temporary files, local PDFs, and earlier ZIPs are
+excluded. Deleting a documentation file requires removing its `paths` entry too,
+or the build fails on the missing path.

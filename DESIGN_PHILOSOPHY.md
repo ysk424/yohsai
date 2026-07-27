@@ -45,7 +45,7 @@ old 3D mesh." The mental model is closer to this:
 3. sew the new pieces;
 4. dress and settle the new garment again.
 
-`Update` must follow this model. It parses the saved PDF or SVG again and constructs
+`Update` must follow this model. It parses the saved PDF again and constructs
 new mesh data from the revised pattern. The new pattern dimensions become the
 new rest state. Physical velocity is reset.
 
@@ -72,8 +72,8 @@ model.
 
 ## 4. Stable labels identify pattern pieces
 
-Human-authored `#` text labels identify corresponding pattern panels across
-PDF/SVG saves and Updates. The text origin is placed inside its closed Bezier panel.
+Human-authored `#` text labels identify corresponding pattern panels across PDF
+saves and Updates. The text origin is placed inside its closed Bezier panel.
 If it is not inside exactly one panel, parsing fails rather than guessing.
 
 Label normalization rules:
@@ -101,7 +101,7 @@ The intended rapid iteration loop is:
 5. press a GRAVITY button to settle the newly cut cloth;
 6. repeat.
 
-The pattern path does not change. `Update` rereads the same PDF or SVG selected
+The pattern path does not change. `Update` rereads the same PDF selected
 by `Pattern Path` and updates the currently selected `Clothes` collection.
 
 For the initial Update scope:
@@ -152,7 +152,7 @@ Undo/Redo recovery does not make simulation state authoritative pattern data.
 Yohsai may mirror seam targets and velocity into Blender data so Blender can
 restore one interactive Kitsuke history step correctly, but that data is scoped
 to the current runtime and may be discarded on restart, Update, or recutting.
-The PDF/SVG pattern remains the only durable construction authority.
+The PDF pattern remains the only durable construction authority.
 
 ## 8. Illustrator interaction should stay minimal
 
@@ -184,8 +184,11 @@ Implemented construction commands include:
 On a RING panel, a sewing letter marks the complete boundary arc bounded by the
 two RING edges. This lets a sleeve armhole become one closed sewing path. The
 matching body armhole may remain split across front and back panels; Sewing
-combines those two open paths virtually and matches them by normalized authored
-length. Unequal lengths are intentional construction data and create gathers.
+combines those two open paths virtually and circularly aligns them with the
+sleeve ring. Unequal authored lengths are intentional construction data and
+create gathers. Unequal vertex counts are not: each GRAVITY click first recuts
+the shorter side so both boundaries carry the same count and pair 1:1, which is
+what lets the longer edge gather instead of splaying open.
 
 Deferred commands include:
 

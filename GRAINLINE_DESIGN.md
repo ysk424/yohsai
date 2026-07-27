@@ -3,8 +3,9 @@
 Status: current Load mesh contract
 
 The PDF page defines warp vertically and weft horizontally. Load samples a
-global 5 mm square lattice, triangulates it for Blender rendering and collision,
-and retains pattern coordinates and grainline attributes for material use.
+global 10 mm square lattice (`MESH_SPACING_M` in `mesh_loader.py`), triangulates
+it for Blender rendering and collision, and retains pattern coordinates and
+grainline attributes for material use.
 
 Stored attributes include `yohsai_pattern_position`,
 `yohsai_grainline_family`, `yohsai_grainline_quad`, sewing membership, and fold

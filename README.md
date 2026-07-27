@@ -68,7 +68,7 @@ Supported annotations are:
 
 No undocumented annotation has implied behavior.
 
-Load samples a 5 mm square material lattice in pattern-page coordinates and
+Load samples a 10 mm square material lattice in pattern-page coordinates and
 uses triangles as the Blender and collision proxy. Pattern coordinates retain
 the material rest state.
 
@@ -97,7 +97,8 @@ required.
 Each click applies:
 
 - existing velocity and downward gravity;
-- distance-independent attraction and zero-distance capture on explicit seam pairs;
+- a constant-distance positional seam closure and zero-distance capture on
+  explicit seam pairs;
 - authored material-edge stretch, square-cell shear, and weak axial bending;
 - Body contact correction.
 
@@ -105,9 +106,9 @@ Pattern attributes define every material rest value. The render-triangulation
 diagonal carries no spring, and no material term reads Body shape, normals, or
 bones. The Body may influence particles only through collision contact.
 
-Every click uses eight 1/240-second substeps, 20 material/contact iterations,
-constant-magnitude seam attraction with 2 mm capture, and 5 mm contact
-thickness. `Zero gravity` applies 0 m/s² and `Normal gravity` applies 9.81 m/s²
+Every click uses eight 1/240-second substeps, 20 material/contact iterations, an
+8 mm-per-substep seam closure with 2 mm capture, and 5 mm contact thickness.
+Sewing moves the pair kinematically and adds no momentum. `Zero gravity` applies 0 m/s² and `Normal gravity` applies 9.81 m/s²
 in world -Z. The two buttons may be alternated without resetting the live
 simulation.
 
@@ -195,9 +196,7 @@ Character silhouettes are exported separately with
 - `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
 - `COSSERAT_DESIGN.md`: native particle solver and compatibility boundary;
 - `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
-- `FINISHED_GARMENT_DESIGN.md`: portable welded garment output contract;
-- `XPBD_HANDOFF_DESIGN.md`: Blender 5.2 experimental cloth compatibility plan;
-- `SESSION_MEMORY.md`: concise current handoff.
+- `FINISHED_GARMENT_DESIGN.md`: portable welded garment output contract.
 
 ## Platforms
 

@@ -413,7 +413,7 @@ def _face_key(face: Iterable[int]) -> tuple[int, ...]:
 def _grid_coordinate(value: float, spacing: float) -> int | None:
     coordinate = int(round(value / spacing))
     # mathutils.Vector stores float32 components, so page coordinates near a
-    # metre need a sub-micron tolerance to round-trip a 5 mm lattice index.
+    # metre need a sub-micron tolerance to round-trip a lattice index.
     if abs(value - coordinate * spacing) <= spacing * 1.0e-4:
         return coordinate
     return None
