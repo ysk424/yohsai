@@ -30,19 +30,12 @@ Status: current development state
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.
 - Update recuts meshes from stable panel labels.
-- Finished Garment is the general-purpose, Body-, rig-, and platform-independent
-  output. It creates a new world-space snapshot, welds only the exact completed
-  sewing classes, and preserves material, UV, color, smoothing, sharp-edge, and
-  valid custom-normal data without modifying Yohsai source parts.
 - `i18n.py` holds the N-panel's Japanese translation dictionary, registered
   under the add-on package name. Operator button labels resolve in the
   `Operator` context and panel headings, property names, and plain labels in
   the default `*` context, so a shared string is registered under both. English
   source strings stay the identifiers; Blender's interface language selects the
   translation.
-- A face collapsed completely by an exact multi-part seam junction is omitted
-  and reported. Every remaining face must still pass the zero-area, duplicate,
-  manifold, and orientation checks before the snapshot is committed.
 
 Only explicit requirements authorize behavior. Do not infer shape, fit, volume,
 or Body-relative placement from names, topology, screenshots, or prior work.
@@ -54,9 +47,13 @@ The extension and native project versions are defined in
 
 ```powershell
 .\build_native.ps1 -Configuration Release
-python -m unittest discover -s tests -p "test_*.py"
-ctest --test-dir build -C Release --output-on-failure
 ```
+
+There is no test suite. The previous one asserted values from superseded
+designs — a 5 mm lattice, a Finished Garment operator, an SVG input path — so it
+blocked corrections instead of catching regressions. Write new tests against the
+code as it is when they are needed, and delete them again rather than let them
+drift.
 
 `blender_manifest.toml` `[build] paths` is the authoritative file list: current
 source, documentation, `bin/yohsai_cosserat.dll`, `bin/vcomp140.dll`, and

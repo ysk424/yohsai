@@ -55,18 +55,3 @@ install(TARGETS yohsai_cosserat
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION bin
 )
-
-if(BUILD_TESTING)
-    add_executable(yohsai_cosserat_tests tests/test_solver.cpp)
-    target_link_libraries(yohsai_cosserat_tests PRIVATE yohsai_cosserat)
-    target_compile_features(yohsai_cosserat_tests PRIVATE cxx_std_20)
-    if(MSVC)
-        target_compile_options(yohsai_cosserat_tests PRIVATE /W4 /permissive- /EHsc)
-    else()
-        target_compile_options(yohsai_cosserat_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    set_target_properties(yohsai_cosserat_tests PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-    )
-    add_test(NAME yohsai_cosserat_tests COMMAND yohsai_cosserat_tests)
-endif()

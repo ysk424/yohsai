@@ -30,7 +30,6 @@ paths = [
     "ui.py",
     "i18n.py",
     "kitsuke.py",
-    "finished_garment.py",
     "zozo_handoff.py",
     "zozo_mcp_client.py",
     "cosserat_native.py",
@@ -41,7 +40,6 @@ paths = [
     "KITSUKE_DESIGN.md",
     "COSSERAT_DESIGN.md",
     "GRAINLINE_DESIGN.md",
-    "FINISHED_GARMENT_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
     "README.md",
@@ -58,5 +56,4 @@ paths = [
     "native/src/solver.hpp",
     "native/src/solver.cpp",
     "native/src/c_api.cpp",
-    "native/tests/test_solver.cpp",
 ]

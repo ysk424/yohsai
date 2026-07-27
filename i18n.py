@@ -24,8 +24,6 @@ translations_dict = {
         ("*", "Zero GRAVITY"): "無重力着付",
         ("Operator", "Normal GRAVITY"): "着付重力有",
         ("*", "Normal GRAVITY"): "着付重力有",
-        ("Operator", "Finished Garment"): "完成メッシュ作成",
-        ("*", "Finished Garment"): "完成メッシュ作成",
         ("Operator", "Prepare for ZOZO"): "ZOZO用に書き出す",
         ("*", "Prepare for ZOZO"): "ZOZO用に書き出す",
     }

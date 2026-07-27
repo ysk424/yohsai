@@ -24,9 +24,7 @@ The normal operation order is:
    Sewing automatically immediately before the simulation.
 4. Continue placement and use either GRAVITY button in any order.
 5. Use `Update` after editing the same Illustrator PDF.
-6. Use `Finished Garment` to create a portable, welded garment snapshot for
-   downstream rigging or export.
-7. For ZOZO simulation instead, start the ZOZO MCP server on port 9633 and use
+6. For ZOZO simulation, start the ZOZO MCP server on port 9633 and use
    `Prepare for ZOZO` to create an animation hand-off.
 
 Every part has two independent attributes: the monotonic `PLACED` -> `PENDING`
@@ -126,26 +124,6 @@ Undo and Redo store the solver state needed to reconstruct the live session
 inside the same add-on runtime. Continuing a partially dressed session after
 restarting Blender is unsupported.
 
-## Finished Garment
-
-`Finished Garment` is available after a completed GRAVITY step includes every
-part in the selected Clothes collection. It bakes the current world-space pose,
-welds only the exact stored sewing pairs, and creates a new single mesh in a
-new numbered collection. The Body, rig, modifiers, physics systems, ZOZO, and
-the question of whether the current pose is a rest pose play no part.
-
-Every click creates a new snapshot and never replaces an earlier one. Source
-parts remain untouched. Polygon material assignments, UV maps, the guaranteed
-`Yohsai Pattern` UV, color attributes, smooth/sharp state, and valid custom
-normals are carried to the welded mesh. Unsewn openings remain open, while
-thickness, automatic weights, platform-specific export, and character fitting
-remain downstream responsibilities.
-
-At a multi-part seam junction, a source triangle may collapse completely when
-its boundary vertices become one exact welded vertex. Only those no-area
-triangles are omitted, with the count reported; remaining topology must still
-pass the manifold and orientation checks.
-
 ## Prepare for ZOZO
 
 `Prepare for ZOZO` is available after at least one completed GRAVITY step. It
@@ -195,8 +173,7 @@ Character silhouettes are exported separately with
 - `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
 - `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
 - `COSSERAT_DESIGN.md`: native particle solver and compatibility boundary;
-- `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
-- `FINISHED_GARMENT_DESIGN.md`: portable welded garment output contract.
+- `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping.
 
 ## Platforms
 
@@ -226,8 +203,8 @@ On macOS (or Linux), use the shell script with CMake and a C++20 compiler:
 ./build_native.sh
 ```
 
-Each script builds the native library and tests, runs CTest, and installs the
-runtime files (`.dll`/`.dylib`) into `bin/`.
+Each script builds the native library and installs the runtime files
+(`.dll`/`.dylib`) into `bin/`.
 
 ## License
 

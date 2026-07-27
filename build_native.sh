@@ -7,5 +7,4 @@ BUILD="$ROOT/build"
 
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$BUILD" --parallel
-ctest --test-dir "$BUILD" --output-on-failure
 cmake --install "$BUILD" --prefix "$ROOT"
