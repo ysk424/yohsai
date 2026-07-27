@@ -30,13 +30,11 @@ Status: current development state
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.
 - Update recuts meshes from stable panel labels.
-- A Cosserat rod was the first solver specification. It did not work and was
-  replaced by the square lattice described in `SOLVER_DESIGN.md`. Nothing in the
-  current design derives from it. The built library file is still named
-  `yohsai_cosserat`, because the macOS binary in `bin/` is prebuilt and cannot be
-  renamed from Windows; rename the CMake target, both binaries, and the
-  `native/include/yohsai_cosserat/` directory together on a machine that can
-  build for both platforms.
+- Kitsuke is dressing, not a physics showcase. Advancing the cloth is one short
+  step between deliberate placements by the operator, so the solver stays the
+  minimum needed to settle a panel: authored rest lengths, the square-cell
+  metric, weak axial bending, and Body contact. Anything reached for from a
+  general soft-body vocabulary is out of scope until dressing itself requires it.
 - `i18n.py` holds the N-panel's Japanese translation dictionary, registered
   under the add-on package name. Operator button labels resolve in the
   `Operator` context and panel headings, property names, and plain labels in
@@ -63,8 +61,8 @@ code as it is when they are needed, and delete them again rather than let them
 drift.
 
 `blender_manifest.toml` `[build] paths` is the authoritative file list: current
-source, documentation, `bin/yohsai_cosserat.dll`, `bin/vcomp140.dll`, and
-`bin/libyohsai_cosserat.dylib`. Wheels come from the separate `wheels` key.
+source, documentation, `bin/yohsai_solver.dll`, `bin/vcomp140.dll`, and
+`bin/libyohsai_solver.dylib`. Wheels come from the separate `wheels` key.
 Build directories, caches, temporary files, local PDFs, and earlier ZIPs are
 excluded. Deleting a documentation file requires removing its `paths` entry too,
 or the build fails on the missing path.

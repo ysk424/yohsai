@@ -116,7 +116,7 @@ def _int_pointer(values: np.ndarray) -> IntPointer:
 
 def _library_candidates() -> tuple[Path, ...]:
     root = Path(__file__).resolve().parent
-    explicit = os.environ.get("YOHSAI_COSSERAT_DLL", "").strip()
+    explicit = os.environ.get("YOHSAI_SOLVER_DLL", "").strip()
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
@@ -125,11 +125,11 @@ def _library_candidates() -> tuple[Path, ...]:
     # side, so an unfiltered list would try to ctypes.CDLL a Windows .dll on
     # macOS and abort before ever reaching the .dylib.
     if sys.platform == "darwin":
-        names = ("libyohsai_cosserat.dylib",)
+        names = ("libyohsai_solver.dylib",)
     elif sys.platform.startswith("win"):
-        names = ("yohsai_cosserat.dll",)
+        names = ("yohsai_solver.dll",)
     else:
-        names = ("libyohsai_cosserat.so",)
+        names = ("libyohsai_solver.so",)
     search_dirs = (
         root / "bin",
         root / "build" / "bin" / "Release",

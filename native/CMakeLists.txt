@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-add_library(yohsai_cosserat SHARED
+add_library(yohsai_solver SHARED
     src/c_api.cpp
     src/solver.cpp
 )
@@ -25,33 +25,33 @@ if(MSVC)
     install(PROGRAMS ${YSC_OPENMP_RUNTIME_LIBS} DESTINATION bin)
 endif()
 
-target_include_directories(yohsai_cosserat
+target_include_directories(yohsai_solver
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_features(yohsai_cosserat PUBLIC cxx_std_20)
-target_compile_definitions(yohsai_cosserat PRIVATE YSC_BUILD_DLL)
+target_compile_features(yohsai_solver PUBLIC cxx_std_20)
+target_compile_definitions(yohsai_solver PRIVATE YSC_BUILD_DLL)
 if(MSVC)
-    target_link_libraries(yohsai_cosserat PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(yohsai_solver PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 if(MSVC)
-    target_compile_options(yohsai_cosserat PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(yohsai_solver PRIVATE /W4 /permissive- /EHsc)
 else()
-    target_compile_options(yohsai_cosserat PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(yohsai_solver PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-set_target_properties(yohsai_cosserat PROPERTIES
-    OUTPUT_NAME "yohsai_cosserat"
+set_target_properties(yohsai_solver PROPERTIES
+    OUTPUT_NAME "yohsai_solver"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
 
-install(TARGETS yohsai_cosserat
+install(TARGETS yohsai_solver
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION bin
 )

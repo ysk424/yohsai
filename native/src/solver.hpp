@@ -2,7 +2,7 @@
 #pragma once
 
 #include "math.hpp"
-#include "yohsai_cosserat/c_api.h"
+#include "yohsai_solver/c_api.h"
 
 #include <array>
 #include <cstdint>

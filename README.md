@@ -180,9 +180,9 @@ Character silhouettes are exported separately with
 Yohsai ships as native per-platform packages and installs on:
 
 - **Windows x64** (`yohsai-<version>-windows_x64.zip`) — bundles
-  `yohsai_cosserat.dll` and the licensed `vcomp140.dll` OpenMP runtime;
+  `yohsai_solver.dll` and the licensed `vcomp140.dll` OpenMP runtime;
 - **macOS Apple Silicon (arm64)** (`yohsai-<version>-macos_arm64.zip`) — bundles
-  `libyohsai_cosserat.dylib`.
+  `libyohsai_solver.dylib`.
 
 The Python solver bridge loads whichever native library matches the host, so a
 single build works on either platform once the matching package is installed.
