@@ -35,16 +35,12 @@ MAX_SOLVER_ITERATIONS = 128
 COLLISION_SEARCH_M = 0.04
 ZERO_GRAVITY_M_PER_SECOND_SQUARED = 0.0
 NORMAL_GRAVITY_M_PER_SECOND_SQUARED = 9.81
-KITSUKE_BACKEND_STABLE_COSSERAT = "STABLE_COSSERAT"
-DEFAULT_KITSUKE_BACKEND = KITSUKE_BACKEND_STABLE_COSSERAT
-KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT,))
 
 _STATE_EPOCH_KEY = "yohsai_kitsuke_epoch"
 _STATE_REVISION_KEY = "yohsai_kitsuke_revision"
 _STATE_SEAMS_KEY = "yohsai_kitsuke_seams"
 _STATE_SEAM_REST_KEY = "yohsai_kitsuke_seam_rest"
 _STATE_MATRIX_KEY = "yohsai_kitsuke_matrix"
-_STATE_BACKEND_KEY = "yohsai_kitsuke_backend"
 _STATE_PARTS_KEY = "yohsai_kitsuke_parts"
 _VELOCITY_ATTRIBUTE = "yohsai_kitsuke_velocity"
 _RUNTIME_EPOCH = uuid4().hex
@@ -113,16 +109,9 @@ def _read_persisted_state(
     collection: bpy.types.Collection,
     parts: list[_PartRange],
     seam_count: int,
-    backend: str | None = None,
 ) -> tuple[int, np.ndarray, np.ndarray] | None:
     if not _persisted_state_is_current(collection):
         return None
-    stored_backend = str(collection.get(_STATE_BACKEND_KEY, KITSUKE_BACKEND_STABLE_COSSERAT))
-    if backend is not None and stored_backend != backend:
-        raise KitsukeError(
-            f"The restored Kitsuke state uses {stored_backend}, not {backend}. "
-            "Select the restored solver or restart from Sewing."
-        )
     try:
         revision = int(collection[_STATE_REVISION_KEY])
         seam_rest = np.asarray(collection[_STATE_SEAM_REST_KEY], dtype=np.float32)
@@ -187,7 +176,6 @@ def _clear_persisted_state(collection: bpy.types.Collection) -> None:
         _STATE_REVISION_KEY,
         _STATE_SEAMS_KEY,
         _STATE_SEAM_REST_KEY,
-        _STATE_BACKEND_KEY,
         _STATE_PARTS_KEY,
     ):
         if key in collection:
@@ -510,7 +498,7 @@ def _unlocked_body_collision_candidates(positions: np.ndarray, body: _BodySnapsh
 
 
 class _KitsukeSession:
-    def __init__(self, context, collection, body, preview, backend: str):
+    def __init__(self, context, collection, body, preview):
         objects = list(participating_parts(collection))
         if len(objects) < 2:
             raise KitsukeError(
@@ -530,7 +518,6 @@ class _KitsukeSession:
             locked_blocks.append(np.full(len(block), 1 if locked else 0, dtype=np.int32))
             offset += len(block)
         self.collection = collection
-        self.backend = backend
         self.parts = ranges
         self.positions = np.concatenate(position_blocks).astype(np.float32)
         self.locked = np.concatenate(locked_blocks).astype(np.int32)
@@ -540,7 +527,7 @@ class _KitsukeSession:
             self.seams = _read_persisted_seams(collection, len(self.positions))
         else:
             self.seams = _seam_constraints_from_parts(collection, ranges)
-        persisted = None if preview is not None else _read_persisted_state(collection, ranges, len(self.seams), backend)
+        persisted = None if preview is not None else _read_persisted_state(collection, ranges, len(self.seams))
         if persisted is None:
             self.revision = 0
             self.velocities = np.zeros_like(self.positions)
@@ -635,7 +622,6 @@ class _KitsukeSession:
         self.collection[_STATE_SEAM_REST_KEY] = [float(value) for value in self.runtime.seam_state()]
         self.collection[_STATE_REVISION_KEY] = self.revision
         self.collection[_STATE_EPOCH_KEY] = _RUNTIME_EPOCH
-        self.collection[_STATE_BACKEND_KEY] = self.backend
         self.collection[_STATE_PARTS_KEY] = [part.obj.name for part in self.parts]
 
     def advance(self, context, gravity_magnitude: float, solver_iterations: int):
@@ -678,12 +664,9 @@ def advance_kitsuke(
     body: bpy.types.Object,
     gravity_magnitude: float,
     solver_iterations: int = SOLVER_ITERATIONS,
-    backend: str = DEFAULT_KITSUKE_BACKEND,
 ) -> str:
     """Advance one fixed Kitsuke interval and restore the separate cloth objects."""
     solver_iterations = max(MIN_SOLVER_ITERATIONS, min(MAX_SOLVER_ITERATIONS, int(solver_iterations)))
-    if backend not in KITSUKE_BACKENDS:
-        raise KitsukeError(f"Unknown Kitsuke solver backend: {backend}")
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise KitsukeError("No loaded Yohsai clothes collection is selected.")
     key = collection.as_pointer()
@@ -698,17 +681,13 @@ def advance_kitsuke(
         session = None
         _sessions.pop(key, None)
     if session is None:
-        session = _KitsukeSession(context, collection, body, preview, backend)
+        session = _KitsukeSession(context, collection, body, preview)
         _sessions[key] = session
     elif body is None or body.as_pointer() != session.body_pointer:
         raise KitsukeError("The Body used by this Kitsuke session cannot be changed after its first step.")
-    elif backend != session.backend:
-        raise KitsukeError(
-            f"This live Kitsuke session uses {session.backend}. Undo to Sewing or reload the pattern before changing solvers."
-        )
     session.advance(context, gravity_magnitude, solver_iterations)
     return (
-        f"GRAVITY: square-lattice cloth + constant-force seams, {STEPS_PER_CLICK} steps; "
+        f"GRAVITY: square-lattice cloth + constant-distance seams, {STEPS_PER_CLICK} steps; "
         f"material/contact {solver_iterations} iterations; gravity -Z {gravity_magnitude:.3g} m/s²"
     )
 

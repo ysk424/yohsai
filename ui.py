@@ -18,7 +18,6 @@ from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 from .i18n import translations_dict
 from .kitsuke import (
     KitsukeError,
-    KITSUKE_BACKEND_STABLE_COSSERAT,
     NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
     SOLVER_ITERATIONS,
     ZERO_GRAVITY_M_PER_SECOND_SQUARED,
@@ -500,7 +499,6 @@ def _run_gravity(operator: Operator, context, gravity_magnitude: float):
             props.body_object,
             gravity_magnitude,
             SOLVER_ITERATIONS,
-            KITSUKE_BACKEND_STABLE_COSSERAT,
         )
         mark_pending_parts_done(pending_parts)
     except Exception as exc:

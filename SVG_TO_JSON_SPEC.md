@@ -238,33 +238,13 @@ Numbers must be finite JSON numbers. The output contains no NaN or Infinity.
 
 ## 9. Blender user interface
 
-The Yohsai N-panel groups all inputs first:
-
-- `Pattern Path`: a file selector for a PDF document;
-- `Clothes`: the loaded numbered collection used by later actions;
-- `Body`: select the fixed collision mesh used by GRAVITY.
-
-It then exposes the primary actions in workflow order:
-
-- `Load`: parse the pattern and create separate cloth-part objects;
-- `Update`: recut the selected Clothes collection from the same saved file;
-- side-by-side `Zero GRAVITY` and `Normal GRAVITY`: build Sewing automatically,
-  advance with 0 or 9.81 m/s², and restore separate parts.
-
-State and deformation `Lock` are independent part attributes. `Lock` changes the
-selected parts' single deformation flag. `Auto` is a colored on/off control and
-is on after every successful Load. Load and switching Auto on perform an explicit
-Auto-lock operation that locks placed and done parts and unlocks pending parts.
-Switching Auto off unlocks all non-placed parts. Placed parts remain outside the
-runtime regardless of their Lock value.
-
-A short status message appears below the actions. Solver tuning and silhouette
-export are intentionally absent from this production panel.
+`README.md` describes the N-panel, the part states, and the Auto-lock rules.
+This section states only what the parser contract requires of it:
 
 `Load` validates the path, starts the external parser, and returns control to
 Blender immediately. Repeated activation while a parse is running is rejected.
 On success Blender validates and reads the fixed JSON document automatically,
-then creates the mesh described in section 10 and enables Auto lock. On failure it displays the parser
+then creates the mesh described in section 10. On failure it displays the parser
 diagnostic and leaves the previous JSON untouched.
 
 ## 10. Initial Blender mesh
@@ -395,13 +375,14 @@ evaluated Body for collision, and creates a transient simulation containing the
 participating source panels. Later clicks without new pending parts reuse that
 live runtime. Pattern rest lengths,
 square-cell metrics, and straight warp/weft triples define the cloth's internal
-response. Paired seam vertices receive distance-independent attraction until
-they are captured at their fixed zero-length goal. Body contact uses a 0.005 m
-thickness. Self-contact is absent.
+response. Paired seam vertices are drawn together by a constant-distance
+positional closure until they are captured at their fixed zero-length goal.
+Self-contact is absent.
 
-One click advances eight fixed 1/240-second steps using 20 material/contact
-iterations. `Zero gravity` applies no downward acceleration and `Normal gravity`
-applies 9.81 m/s². Seam targets do not change per click.
+`KITSUKE_DESIGN.md` owns every fixed runtime value — step size, substeps,
+iterations, seam closure, contact thickness — and cites the constant that
+defines each. Do not restate them here; a copy is what drifts.
+
 After the calculation, positions are mapped
 back by source object and vertex index, the combined preview is removed, and
 the separate source objects are shown. Every pending part becomes `DONE` without
@@ -415,7 +396,7 @@ yet completely detected; topology must be changed in the pattern. The Body is
 constant within one live runtime.
 
 Exact seam pairs and fixed targets, per-vertex velocity, revision, runtime epoch,
-Object Mode matrices, and solver backend are stored in undoable Blender data
+and Object Mode matrices are stored in undoable Blender data
 after every committed click. Blender `undo_post` and
 `redo_post` handlers discard non-undoable live runtimes. The next GRAVITY click
 reconstructs them from the state restored by Blender. Recovery data is valid only for the current add-on

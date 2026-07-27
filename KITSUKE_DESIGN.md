@@ -164,7 +164,8 @@ Blender-side broad phase (`COLLISION_SEARCH_M`).
 `Zero gravity` advances with no gravitational acceleration. `Normal gravity`
 applies `(0, 0, -9.81)` m/s². Either button can follow the other within the same
 live session without resetting positions, velocities, or seam state. The solver
-is always the native CPU Square-Lattice Cloth backend.
+is always the native CPU Square-Lattice Cloth library; there is no solver
+selection.
 
 There is no sweep phase after the iteration loop. Each iteration runs seam
 capture, captured seams, quad shear, axial bend, four alternating edge sweeps,
@@ -197,6 +198,6 @@ connection available among the current participants, including one side of a
 multipart label whose other side is still placed.
 
 Undoable state stores seam pairs, the fixed seam state, velocity, revision,
-backend, runtime epoch, and Object Mode matrices. Recovery is limited to the
+runtime epoch, and Object Mode matrices. Recovery is limited to the
 current add-on runtime. A click is rolled back only if the returned particle
 state is non-finite; there is no finite-distance movement threshold.

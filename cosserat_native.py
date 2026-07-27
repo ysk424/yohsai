@@ -230,14 +230,6 @@ def _get_library() -> ctypes.CDLL:
     return _library
 
 
-def native_library_available() -> bool:
-    try:
-        _get_library()
-        return True
-    except NativeCosseratError:
-        return False
-
-
 class NativeCosseratRuntime:
     """Own one native cloth solver and expose Kitsuke state operations."""
 

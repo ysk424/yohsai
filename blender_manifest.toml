@@ -35,7 +35,6 @@ paths = [
     "cosserat_native.py",
     "mesh_loader.py",
     "yohsai_svg_parser.py",
-    "yohsai_defaults.json",
     "SVG_TO_JSON_SPEC.md",
     "KITSUKE_DESIGN.md",
     "COSSERAT_DESIGN.md",
