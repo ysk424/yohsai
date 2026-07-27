@@ -35,7 +35,7 @@ Clicks do not shorten, replace, or ratchet this target.
 
 Sewing is not a force. Until capture it is a positional drag applied once per
 substep, ahead of the prediction, so it contributes no momentum; see
-`COSSERAT_DESIGN.md`. The closure is a constant distance and only its direction
+`SOLVER_DESIGN.md`. The closure is a constant distance and only its direction
 follows the endpoint line, so a 50 cm and a 5 cm gap close at the same rate. At
 2 mm, or when the endpoints cross during a substep, the pair is captured and
 held at zero distance.

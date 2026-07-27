@@ -30,6 +30,13 @@ Status: current development state
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.
 - Update recuts meshes from stable panel labels.
+- A Cosserat rod was the first solver specification. It did not work and was
+  replaced by the square lattice described in `SOLVER_DESIGN.md`. Nothing in the
+  current design derives from it. The built library file is still named
+  `yohsai_cosserat`, because the macOS binary in `bin/` is prebuilt and cannot be
+  renamed from Windows; rename the CMake target, both binaries, and the
+  `native/include/yohsai_cosserat/` directory together on a machine that can
+  build for both platforms.
 - `i18n.py` holds the N-panel's Japanese translation dictionary, registered
   under the add-on package name. Operator button labels resolve in the
   `Operator` context and panel headings, property names, and plain labels in

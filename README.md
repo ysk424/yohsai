@@ -172,7 +172,7 @@ Character silhouettes are exported separately with
 - `SVG_TO_JSON_SPEC.md`: input, JSON, Load, automatic Sewing, GRAVITY, and Update contract;
 - `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
 - `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
-- `COSSERAT_DESIGN.md`: native particle solver and compatibility boundary;
+- `SOLVER_DESIGN.md`: native particle solver and compatibility boundary;
 - `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping.
 
 ## Platforms

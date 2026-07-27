@@ -15,7 +15,7 @@ API_VERSION = 8
 _ERROR_CAPACITY = 1024
 
 
-class NativeCosseratError(RuntimeError):
+class NativeSolverError(RuntimeError):
     """The packaged native Kitsuke runtime cannot be loaded or advanced."""
 
 
@@ -93,7 +93,7 @@ def _float_array(values, shape: tuple[int, ...], name: str) -> np.ndarray:
     if result.size == 0 and np.prod(shape, dtype=np.int64) == 0:
         result = np.empty(shape, dtype=np.float32)
     if result.shape != shape or not np.all(np.isfinite(result)):
-        raise NativeCosseratError(f"{name} must be a finite float32 array with shape {shape}.")
+        raise NativeSolverError(f"{name} must be a finite float32 array with shape {shape}.")
     return result
 
 
@@ -102,7 +102,7 @@ def _int_array(values, columns: int, name: str) -> np.ndarray:
     if result.size == 0:
         return np.empty((0, columns), dtype=np.int32)
     if result.ndim != 2 or result.shape[1] != columns:
-        raise NativeCosseratError(f"{name} must be an int32 array with shape (N, {columns}).")
+        raise NativeSolverError(f"{name} must be an int32 array with shape (N, {columns}).")
     return result
 
 
@@ -208,15 +208,15 @@ def _load_library() -> ctypes.CDLL:
         try:
             library = ctypes.CDLL(str(path))
         except OSError as exc:
-            raise NativeCosseratError(f"Cannot load native Kitsuke library {path}: {exc}") from exc
+            raise NativeSolverError(f"Cannot load native Kitsuke library {path}: {exc}") from exc
         _configure_library(library)
         version = int(library.ysc_get_api_version())
         if version != API_VERSION:
-            raise NativeCosseratError(
+            raise NativeSolverError(
                 f"Native Kitsuke API {version} does not match the extension API {API_VERSION}."
             )
         return library
-    raise NativeCosseratError(
+    raise NativeSolverError(
         "Native Kitsuke library was not found. "
         "Build it with build_native.ps1 (Windows) or build_native.sh (macOS/Linux). "
         f"Searched: {', '.join(attempted)}"
@@ -230,7 +230,7 @@ def _get_library() -> ctypes.CDLL:
     return _library
 
 
-class NativeCosseratRuntime:
+class NativeSolverRuntime:
     """Own one native cloth solver and expose Kitsuke state operations."""
 
     def __init__(self, positions, velocities, seams, topology, body, locked):
@@ -258,12 +258,12 @@ class NativeCosseratRuntime:
         body_faces = _int_array(body.faces, 3, "Body faces")
         locked_array = np.ascontiguousarray(locked, dtype=np.int32)
         if locked_array.shape != (self.vertex_count,):
-            raise NativeCosseratError(f"locked must have shape ({self.vertex_count},).")
+            raise NativeSolverError(f"locked must have shape ({self.vertex_count},).")
         inverse_masses = np.ones(self.vertex_count, dtype=np.float32)
 
         config = _Config()
         if self._library.ysc_default_config(ctypes.byref(config)) != 0:
-            raise NativeCosseratError("Native solver did not provide a default configuration.")
+            raise NativeSolverError("Native solver did not provide a default configuration.")
 
         desc = _CreateDesc(
             self.vertex_count,
@@ -289,7 +289,7 @@ class NativeCosseratRuntime:
         )
         self._call("ysc_create", ctypes.byref(desc), ctypes.byref(config), ctypes.byref(self._handle))
         if not self._handle:
-            raise NativeCosseratError("Native solver returned no handle.")
+            raise NativeSolverError("Native solver returned no handle.")
 
         vertex_count = ctypes.c_int32()
         seam_count = ctypes.c_int32()
@@ -301,17 +301,17 @@ class NativeCosseratRuntime:
         )
         if vertex_count.value != self.vertex_count or seam_count.value != self.seam_count:
             self.close()
-            raise NativeCosseratError("Native solver count validation failed.")
+            raise NativeSolverError("Native solver count validation failed.")
         self.last_stats: dict[str, float | int] = {}
 
     def _call(self, function_name: str, *arguments) -> None:
         if function_name != "ysc_create" and not self._handle:
-            raise NativeCosseratError("Native Kitsuke runtime is closed.")
+            raise NativeSolverError("Native Kitsuke runtime is closed.")
         error = ctypes.create_string_buffer(_ERROR_CAPACITY)
         status = int(getattr(self._library, function_name)(*arguments, error, _ERROR_CAPACITY))
         if status != 0:
             message = error.value.decode("utf-8", errors="replace").strip()
-            raise NativeCosseratError(message or f"{function_name} failed with native status {status}.")
+            raise NativeSolverError(message or f"{function_name} failed with native status {status}.")
 
     def close(self) -> None:
         if getattr(self, "_handle", None):
@@ -329,7 +329,7 @@ class NativeCosseratRuntime:
         velocities_array = _float_array(velocities, (self.vertex_count, 3), "velocities")
         locked_array = np.ascontiguousarray(locked, dtype=np.int32)
         if locked_array.shape != (self.vertex_count,):
-            raise NativeCosseratError(f"locked must have shape ({self.vertex_count},).")
+            raise NativeSolverError(f"locked must have shape ({self.vertex_count},).")
         self._call(
             "ysc_replace_state",
             self._handle,

@@ -9,9 +9,9 @@ import numpy as np
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
-from .cosserat_native import (
-    NativeCosseratError,
-    NativeCosseratRuntime,
+from .native_solver import (
+    NativeSolverError,
+    NativeSolverRuntime,
 )
 from .mesh_loader import (
     GRAINLINE_EDGE_FAMILY_ATTRIBUTE,
@@ -539,7 +539,7 @@ class _KitsukeSession:
         self.matrices = {part.obj.name: _matrix_tuple(part.obj.matrix_world) for part in ranges}
         self.preview = preview
         try:
-            self.runtime = NativeCosseratRuntime(
+            self.runtime = NativeSolverRuntime(
                 self.positions,
                 self.velocities,
                 self.seams,
@@ -547,7 +547,7 @@ class _KitsukeSession:
                 self.body,
                 self.locked,
             )
-        except NativeCosseratError as exc:
+        except NativeSolverError as exc:
             raise KitsukeError(str(exc)) from exc
         if persisted is not None:
             self.runtime.replace_seam_state(persisted_seams)
@@ -632,7 +632,7 @@ class _KitsukeSession:
         body_candidates = _unlocked_body_collision_candidates(self.positions, self.body, self.locked)
         try:
             self.runtime.advance(body_candidates, gravity_magnitude, solver_iterations)
-        except NativeCosseratError as exc:
+        except NativeSolverError as exc:
             self.runtime.replace_state(previous_positions, previous_velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)
             raise KitsukeError(str(exc)) from exc
