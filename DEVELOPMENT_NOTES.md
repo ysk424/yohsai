@@ -30,6 +30,12 @@ Status: current development state
   output. It creates a new world-space snapshot, welds only the exact completed
   sewing classes, and preserves material, UV, color, smoothing, sharp-edge, and
   valid custom-normal data without modifying Yohsai source parts.
+- `i18n.py` holds the N-panel's Japanese translation dictionary, registered
+  under the add-on package name. Operator button labels resolve in the
+  `Operator` context and panel headings, property names, and plain labels in
+  the default `*` context, so a shared string is registered under both. English
+  source strings stay the identifiers; Blender's interface language selects the
+  translation.
 - A face collapsed completely by an exact multi-part seam junction is omitted
   and reported. Every remaining face must still pass the zero-area, duplicate,
   manifold, and orientation checks before the snapshot is committed.

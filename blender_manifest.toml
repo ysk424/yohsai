@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.8.0"
+version = "0.8.1"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -28,6 +28,7 @@ paths = [
     "CMakeLists.txt",
     "build_native.ps1",
     "ui.py",
+    "i18n.py",
     "kitsuke.py",
     "finished_garment.py",
     "zozo_handoff.py",

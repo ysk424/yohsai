@@ -16,6 +16,7 @@ from bpy.props import BoolProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .finished_garment import FinishedGarmentError, create_finished_garment
+from .i18n import translations_dict
 from .kitsuke import (
     KitsukeError,
     KITSUKE_BACKEND_STABLE_COSSERAT,
@@ -708,10 +709,12 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.yohsai = PointerProperty(type=YohsaiProperties)
     _register_history_handlers()
+    bpy.app.translations.register(__package__, translations_dict)
 
 
 def unregister():
     global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
+    bpy.app.translations.unregister(__package__)
     _unregister_history_handlers()
     reset_runtime_epoch()
     if bpy.app.timers.is_registered(_poll_svg_parser):

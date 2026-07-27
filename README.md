@@ -42,6 +42,15 @@ operation again. A `PLACED` part remains outside the simulation. `Lock` directly
 changes the same independent deformation attribute on selected clothes parts.
 The Auto control is a colored toggle whose pressed state shows that it is on.
 
+## Interface language
+
+Yohsai registers a Japanese translation of the N-panel through
+`bpy.app.translations`. Blender's own interface language selects it: set
+`Edit > Preferences > Interface > Translation` to Japanese and enable
+`Interface`. Under any other language, or with translation disabled, the panel
+stays English. The English strings remain the identifiers, and this document
+uses them throughout.
+
 ## Pattern input
 
 The parser accepts a one-page Illustrator PDF. Each closed panel must contain a
