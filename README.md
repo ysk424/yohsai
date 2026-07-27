@@ -173,7 +173,9 @@ Character silhouettes are exported separately with
 - `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
 - `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
 - `SOLVER_DESIGN.md`: native particle solver and compatibility boundary;
-- `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping.
+- `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
+- `PPF_OPEN_ISSUES.md`: known hand-off defects, to be fixed against a running
+  solver rather than from the code.
 
 ## Platforms
 

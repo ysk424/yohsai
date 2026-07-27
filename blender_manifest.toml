@@ -39,6 +39,7 @@ paths = [
     "KITSUKE_DESIGN.md",
     "SOLVER_DESIGN.md",
     "GRAINLINE_DESIGN.md",
+    "PPF_OPEN_ISSUES.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
     "README.md",
