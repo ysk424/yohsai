@@ -54,11 +54,31 @@ The extension and native project versions are defined in
 .\build_native.ps1 -Configuration Release
 ```
 
-There is no test suite. The previous one asserted values from superseded
-designs — a 5 mm lattice, a Finished Garment operator, an SVG input path — so it
-blocked corrections instead of catching regressions. Write new tests against the
-code as it is when they are needed, and delete them again rather than let them
-drift.
+### OpenMP colouring (0.8.2+)
+
+The native square-lattice solver parallelises material projections with OpenMP.
+
+- At create time the solver greedily colours seams, edges, quads, and bends so
+  that constraints of one colour never share a vertex.
+- Each colour is projected with `#pragma omp parallel for`; colours stay
+  sequential (Gauss-Seidel across colours, independent within a colour).
+- Body-candidate accumulation stays serial (candidates can share a cloth
+  vertex). Integrate, finish, and contact apply are vertex-parallel.
+- Thread count is the usual OpenMP control: `OMP_NUM_THREADS` (and the MSVC
+  runtime `vcomp140.dll` already shipped under `bin/`).
+
+Colouring changes the pure serial Gauss-Seidel update order: neighbouring
+constraints only see updates from earlier colours. Settled poses can differ
+from pre-0.8.2 builds even at the same iteration count. With correct
+colouring, different thread counts should match each other; if they disagree,
+colouring is incomplete. `tests/openmp_colour_smoke.py` checks that property
+on a small hanging lattice.
+
+There is no broad product test suite. Older suites asserted values from
+superseded designs — a 5 mm lattice, a Finished Garment operator, an SVG input
+path — so they blocked corrections instead of catching regressions. Write new
+tests against the code as it is when they are needed, and delete them again
+rather than let them drift.
 
 `blender_manifest.toml` `[build] paths` is the authoritative file list: current
 source, documentation, `bin/yohsai_solver.dll`, `bin/vcomp140.dll`, and

@@ -80,6 +80,16 @@ endpoint crossing, the pair is captured at zero distance. There is no
 seam-target shortening, Body attraction, shape matching, self-contact, or speed
 clamp.
 
+### OpenMP colouring
+
+Seams / edges / quads / bends are greedily coloured so each colour class is
+vertex-disjoint. Projection walks colours in order (or reverse) and runs
+`#pragma omp parallel for` inside a colour. Integrate and contact apply are
+per-vertex parallel; Body candidate accumulation stays serial. Thread count is
+`OMP_NUM_THREADS`. Colouring changes the pure serial Gauss-Seidel update order,
+so settled poses can differ from pre-colouring builds; different thread counts
+on the same coloured schedule should match.
+
 Sewing is an operator instruction rather than a force, so it must not become
 momentum. The drag is applied ahead of the prediction, which rebases `previous`
 onto the dragged position and keeps the pull itself out of the reconstructed

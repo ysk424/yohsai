@@ -5,6 +5,11 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#if defined(_OPENMP)
+#  include <omp.h>
+#endif
 
 namespace ysc {
 namespace {
@@ -23,6 +28,47 @@ void validate_index(int32_t index, int32_t size, const char* label) {
     if (index < 0 || index >= size) {
         throw std::out_of_range(std::string(label) + " index is out of range");
     }
+}
+
+// Greedy graph colouring of constraints. Two constraints that share a vertex
+// receive different colours so each colour class is vertex-disjoint and safe
+// for OpenMP write-parallel projection.
+template <typename VisitVertices>
+ColorGroups colour_constraints(
+    int32_t constraint_count,
+    int32_t vertex_count,
+    VisitVertices&& visit_vertices) {
+    ColorGroups groups;
+    if (constraint_count <= 0) {
+        return groups;
+    }
+    std::vector<std::vector<int32_t>> colours_at_vertex(static_cast<size_t>(vertex_count));
+    std::vector<int32_t> constraint_colour(static_cast<size_t>(constraint_count), -1);
+    std::vector<uint8_t> used;
+    for (int32_t index = 0; index < constraint_count; ++index) {
+        used.assign(groups.size() + 1, 0);
+        visit_vertices(index, [&](int32_t vertex) {
+            for (const int32_t colour : colours_at_vertex[static_cast<size_t>(vertex)]) {
+                if (colour >= 0 && static_cast<size_t>(colour) < used.size()) {
+                    used[static_cast<size_t>(colour)] = 1;
+                }
+            }
+        });
+        int32_t colour = 0;
+        while (static_cast<size_t>(colour) < used.size() && used[static_cast<size_t>(colour)] != 0) {
+            ++colour;
+        }
+        if (static_cast<size_t>(colour) >= groups.size()) {
+            groups.emplace_back();
+            used.push_back(0);
+        }
+        constraint_colour[static_cast<size_t>(index)] = colour;
+        groups[static_cast<size_t>(colour)].push_back(index);
+        visit_vertices(index, [&](int32_t vertex) {
+            colours_at_vertex[static_cast<size_t>(vertex)].push_back(colour);
+        });
+    }
+    return groups;
 }
 
 }  // namespace
@@ -182,7 +228,42 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
     contact_corrections_.resize(vertices_.size());
     contact_correction_counts_.resize(vertices_.size());
     seam_driven_.resize(vertices_.size());
+    build_color_groups();
     require_finite_state();
+}
+
+void Solver::build_color_groups() {
+    const int32_t vertex_count = static_cast<int32_t>(vertices_.size());
+    seam_colors_ = colour_constraints(
+        static_cast<int32_t>(seams_.size()),
+        vertex_count,
+        [&](int32_t index, auto&& emit) {
+            emit(seams_[static_cast<size_t>(index)].a);
+            emit(seams_[static_cast<size_t>(index)].b);
+        });
+    edge_colors_ = colour_constraints(
+        static_cast<int32_t>(edges_.size()),
+        vertex_count,
+        [&](int32_t index, auto&& emit) {
+            emit(edges_[static_cast<size_t>(index)].a);
+            emit(edges_[static_cast<size_t>(index)].b);
+        });
+    quad_colors_ = colour_constraints(
+        static_cast<int32_t>(quads_.size()),
+        vertex_count,
+        [&](int32_t index, auto&& emit) {
+            for (const int32_t vertex : quads_[static_cast<size_t>(index)].vertices) {
+                emit(vertex);
+            }
+        });
+    bend_colors_ = colour_constraints(
+        static_cast<int32_t>(bends_.size()),
+        vertex_count,
+        [&](int32_t index, auto&& emit) {
+            for (const int32_t vertex : bends_[static_cast<size_t>(index)].vertices) {
+                emit(vertex);
+            }
+        });
 }
 
 int32_t Solver::vertex_count() const noexcept {
@@ -269,7 +350,12 @@ void Solver::copy_seam_state(float* target_lengths) const {
 }
 
 void Solver::integrate(const Vec3& gravity, float time_step) {
-    for (Vertex& vertex : vertices_) {
+    const int32_t count = static_cast<int32_t>(vertices_.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static)
+#endif
+    for (int32_t index = 0; index < count; ++index) {
+        Vertex& vertex = vertices_[static_cast<size_t>(index)];
         vertex.previous = vertex.position;
         if (vertex.locked || vertex.inverse_mass <= 0.0F) {
             vertex.velocity = {};
@@ -362,9 +448,16 @@ void Solver::project_distance(
 }
 
 void Solver::project_seams() {
-    for (const Seam& seam : seams_) {
-        if (seam.captured) {
-            project_distance(seam.a, seam.b, seam.target_length, 1.0F);
+    for (const std::vector<int32_t>& group : seam_colors_) {
+        const int32_t count = static_cast<int32_t>(group.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static) if (count > 8)
+#endif
+        for (int32_t local = 0; local < count; ++local) {
+            const Seam& seam = seams_[static_cast<size_t>(group[static_cast<size_t>(local)])];
+            if (seam.captured) {
+                project_distance(seam.a, seam.b, seam.target_length, 1.0F);
+            }
         }
     }
 }
@@ -412,114 +505,128 @@ void Solver::project_edge(const Edge& edge) {
 }
 
 void Solver::project_edges(bool reverse) {
-    if (!reverse) {
-        for (const Edge& edge : edges_) {
-            project_edge(edge);
+    const int32_t colour_count = static_cast<int32_t>(edge_colors_.size());
+    for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
+        const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
+        const std::vector<int32_t>& group = edge_colors_[static_cast<size_t>(colour)];
+        const int32_t count = static_cast<int32_t>(group.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static) if (count > 16)
+#endif
+        for (int32_t local = 0; local < count; ++local) {
+            const int32_t index = reverse ? (count - 1 - local) : local;
+            project_edge(edges_[static_cast<size_t>(group[static_cast<size_t>(index)])]);
         }
+    }
+}
+
+void Solver::project_quad(const Quad& quad) {
+    std::array<Vertex*, 4> vertices{};
+    std::array<float, 4> weights{};
+    for (size_t corner = 0; corner < 4; ++corner) {
+        vertices[corner] = &vertices_[static_cast<size_t>(quad.vertices[corner])];
+        const Vertex& vertex = *vertices[corner];
+        weights[corner] = (!vertex.locked && vertex.inverse_mass > 0.0F)
+            ? vertex.inverse_mass
+            : 0.0F;
+    }
+    const Vec3& x0 = vertices[0]->position;
+    const Vec3& x1 = vertices[1]->position;
+    const Vec3& x2 = vertices[2]->position;
+    const Vec3& x3 = vertices[3]->position;
+    const Vec3 u = 0.5F * ((x1 - x0) + (x2 - x3));
+    const Vec3 v = 0.5F * ((x3 - x0) + (x2 - x1));
+    const float value = dot(u, v) - quad.rest_shear;
+    const std::array<Vec3, 4> gradients{
+        -0.5F * (u + v),
+        0.5F * (v - u),
+        0.5F * (u + v),
+        0.5F * (u - v),
+    };
+    float denominator = 0.0F;
+    for (size_t corner = 0; corner < 4; ++corner) {
+        denominator += weights[corner] * length_squared(gradients[corner]);
+    }
+    if (!(denominator > kEpsilon * kEpsilon)) {
         return;
     }
-    for (auto iterator = edges_.rbegin(); iterator != edges_.rend(); ++iterator) {
-        project_edge(*iterator);
+    const float multiplier = -config_.shear_relaxation * value / denominator;
+    for (size_t corner = 0; corner < 4; ++corner) {
+        if (weights[corner] > 0.0F) {
+            vertices[corner]->position += clamp_length(
+                weights[corner] * multiplier * gradients[corner],
+                config_.maximum_position_correction);
+        }
     }
 }
 
 void Solver::project_quad_shear(bool reverse) {
-    const auto project = [&](const Quad& quad) {
-        std::array<Vertex*, 4> vertices{};
-        std::array<float, 4> weights{};
-        for (size_t corner = 0; corner < 4; ++corner) {
-            vertices[corner] = &vertices_[static_cast<size_t>(quad.vertices[corner])];
-            const Vertex& vertex = *vertices[corner];
-            weights[corner] = (!vertex.locked && vertex.inverse_mass > 0.0F)
-                ? vertex.inverse_mass
-                : 0.0F;
+    const int32_t colour_count = static_cast<int32_t>(quad_colors_.size());
+    for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
+        const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
+        const std::vector<int32_t>& group = quad_colors_[static_cast<size_t>(colour)];
+        const int32_t count = static_cast<int32_t>(group.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static) if (count > 8)
+#endif
+        for (int32_t local = 0; local < count; ++local) {
+            const int32_t index = reverse ? (count - 1 - local) : local;
+            project_quad(quads_[static_cast<size_t>(group[static_cast<size_t>(index)])]);
         }
-        const Vec3& x0 = vertices[0]->position;
-        const Vec3& x1 = vertices[1]->position;
-        const Vec3& x2 = vertices[2]->position;
-        const Vec3& x3 = vertices[3]->position;
-        const Vec3 u = 0.5F * ((x1 - x0) + (x2 - x3));
-        const Vec3 v = 0.5F * ((x3 - x0) + (x2 - x1));
-        const float value = dot(u, v) - quad.rest_shear;
-        const std::array<Vec3, 4> gradients{
-            -0.5F * (u + v),
-            0.5F * (v - u),
-            0.5F * (u + v),
-            0.5F * (u - v),
-        };
-        float denominator = 0.0F;
-        for (size_t corner = 0; corner < 4; ++corner) {
-            denominator += weights[corner] * length_squared(gradients[corner]);
-        }
-        if (!(denominator > kEpsilon * kEpsilon)) {
-            return;
-        }
-        const float multiplier = -config_.shear_relaxation * value / denominator;
-        for (size_t corner = 0; corner < 4; ++corner) {
-            if (weights[corner] > 0.0F) {
-                vertices[corner]->position += clamp_length(
-                    weights[corner] * multiplier * gradients[corner],
-                    config_.maximum_position_correction);
-            }
-        }
+    }
+}
+
+void Solver::project_bend(const Bend& bend) {
+    std::array<Vertex*, 3> vertices{};
+    std::array<float, 3> weights{};
+    for (size_t point = 0; point < 3; ++point) {
+        vertices[point] = &vertices_[static_cast<size_t>(bend.vertices[point])];
+        const Vertex& vertex = *vertices[point];
+        weights[point] = (!vertex.locked && vertex.inverse_mass > 0.0F)
+            ? vertex.inverse_mass
+            : 0.0F;
+    }
+    const float previous_coefficient = 1.0F / bend.previous_rest_length;
+    const float next_coefficient = 1.0F / bend.next_rest_length;
+    const std::array<float, 3> coefficients{
+        previous_coefficient,
+        -(previous_coefficient + next_coefficient),
+        next_coefficient,
     };
-    if (!reverse) {
-        for (const Quad& quad : quads_) {
-            project(quad);
-        }
+    const Vec3 curvature =
+        coefficients[0] * vertices[0]->position +
+        coefficients[1] * vertices[1]->position +
+        coefficients[2] * vertices[2]->position;
+    float denominator = 0.0F;
+    for (size_t point = 0; point < 3; ++point) {
+        denominator += weights[point] * coefficients[point] * coefficients[point];
+    }
+    if (!(denominator > kEpsilon)) {
         return;
     }
-    for (auto iterator = quads_.rbegin(); iterator != quads_.rend(); ++iterator) {
-        project(*iterator);
+    for (size_t point = 0; point < 3; ++point) {
+        if (weights[point] > 0.0F) {
+            vertices[point]->position += clamp_length(
+                (-config_.bend_relaxation * weights[point] * coefficients[point] / denominator) *
+                    curvature,
+                config_.maximum_position_correction);
+        }
     }
 }
 
 void Solver::project_bends(bool reverse) {
-    const auto project = [&](const Bend& bend) {
-        std::array<Vertex*, 3> vertices{};
-        std::array<float, 3> weights{};
-        for (size_t point = 0; point < 3; ++point) {
-            vertices[point] = &vertices_[static_cast<size_t>(bend.vertices[point])];
-            const Vertex& vertex = *vertices[point];
-            weights[point] = (!vertex.locked && vertex.inverse_mass > 0.0F)
-                ? vertex.inverse_mass
-                : 0.0F;
+    const int32_t colour_count = static_cast<int32_t>(bend_colors_.size());
+    for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
+        const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
+        const std::vector<int32_t>& group = bend_colors_[static_cast<size_t>(colour)];
+        const int32_t count = static_cast<int32_t>(group.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static) if (count > 8)
+#endif
+        for (int32_t local = 0; local < count; ++local) {
+            const int32_t index = reverse ? (count - 1 - local) : local;
+            project_bend(bends_[static_cast<size_t>(group[static_cast<size_t>(index)])]);
         }
-        const float previous_coefficient = 1.0F / bend.previous_rest_length;
-        const float next_coefficient = 1.0F / bend.next_rest_length;
-        const std::array<float, 3> coefficients{
-            previous_coefficient,
-            -(previous_coefficient + next_coefficient),
-            next_coefficient,
-        };
-        const Vec3 curvature =
-            coefficients[0] * vertices[0]->position +
-            coefficients[1] * vertices[1]->position +
-            coefficients[2] * vertices[2]->position;
-        float denominator = 0.0F;
-        for (size_t point = 0; point < 3; ++point) {
-            denominator += weights[point] * coefficients[point] * coefficients[point];
-        }
-        if (!(denominator > kEpsilon)) {
-            return;
-        }
-        for (size_t point = 0; point < 3; ++point) {
-            if (weights[point] > 0.0F) {
-                vertices[point]->position += clamp_length(
-                    (-config_.bend_relaxation * weights[point] * coefficients[point] / denominator) *
-                        curvature,
-                    config_.maximum_position_correction);
-            }
-        }
-    };
-    if (!reverse) {
-        for (const Bend& bend : bends_) {
-            project(bend);
-        }
-        return;
-    }
-    for (auto iterator = bends_.rbegin(); iterator != bends_.rend(); ++iterator) {
-        project(*iterator);
     }
 }
 
@@ -572,6 +679,8 @@ void Solver::clear_contact_corrections() {
 void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
     // Clear first: the counts double as this substep's contact flags, so stale
     // ones would keep damping a vertex that has already left the Body.
+    // Candidate accumulation is left serial: candidates can share a cloth
+    // vertex, so parallel writes would need atomics on Vec3 accumulators.
     clear_contact_corrections();
     if (count <= 0) {
         return;
@@ -599,32 +708,41 @@ void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
             ++contact_correction_counts_[static_cast<size_t>(vertex_index)];
         }
     }
-    for (size_t index = 0; index < vertices_.size(); ++index) {
-        if (contact_correction_counts_[index] <= 0) {
+    const int32_t vertex_count = static_cast<int32_t>(vertices_.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static)
+#endif
+    for (int32_t index = 0; index < vertex_count; ++index) {
+        if (contact_correction_counts_[static_cast<size_t>(index)] <= 0) {
             continue;
         }
         Vec3 correction =
-            contact_corrections_[index] / static_cast<float>(contact_correction_counts_[index]);
+            contact_corrections_[static_cast<size_t>(index)] /
+            static_cast<float>(contact_correction_counts_[static_cast<size_t>(index)]);
         correction = clamp_length(correction, config_.maximum_position_correction * 0.04F);
-        vertices_[index].position += correction;
+        vertices_[static_cast<size_t>(index)].position += correction;
     }
 }
 
 void Solver::finish_substep(float time_step) {
-    for (size_t index = 0; index < vertices_.size(); ++index) {
-        Vertex& vertex = vertices_[index];
+    const int32_t count = static_cast<int32_t>(vertices_.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static)
+#endif
+    for (int32_t index = 0; index < count; ++index) {
+        Vertex& vertex = vertices_[static_cast<size_t>(index)];
         if (vertex.locked || vertex.inverse_mass <= 0.0F) {
             vertex.velocity = {};
             continue;
         }
-        if (seam_driven_[index] != 0) {
+        if (seam_driven_[static_cast<size_t>(index)] != 0) {
             // Still being sewn: the span's motion is the drag and the material's
             // answer to it, neither of which the pair may coast on afterwards.
             vertex.velocity = {};
             continue;
         }
         vertex.velocity = (vertex.position - vertex.previous) / time_step;
-        if (contact_correction_counts_[index] > 0) {
+        if (contact_correction_counts_[static_cast<size_t>(index)] > 0) {
             // Contact is purely dissipative: it may remove kinetic energy but
             // never adds any, so a moving Body cannot fling the cloth.  Gravity
             // re-drives the span each substep, so it still creeps and settles.
@@ -692,6 +810,12 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             // pass per iteration leaves the middle of a panel — the part
             // furthest from any anchor — never reached, and the lattice grows
             // instead of settling onto its authored spacing.
+            //
+            // Coloured OpenMP replaces pure sequential GS order with independent
+            // sets: within a colour the projections are race-free and parallel,
+            // but neighbouring constraints only see updates from earlier
+            // colours.  That changes both convergence and the settled pose
+            // relative to a single ordered sweep.
             project_edges(reverse);
             project_edges(!reverse);
             project_edges(reverse);

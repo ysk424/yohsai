@@ -5,8 +5,11 @@ add_library(yohsai_solver SHARED
     src/solver.cpp
 )
 
+find_package(OpenMP COMPONENTS CXX)
 if(MSVC)
-    find_package(OpenMP REQUIRED COMPONENTS CXX)
+    if(NOT OpenMP_CXX_FOUND)
+        message(FATAL_ERROR "MSVC OpenMP is required for the Windows solver")
+    endif()
     # MSVC OpenMP links VCOMP140.DLL dynamically. Install the licensed x64
     # redistributable beside the solver so a portable Blender installation
     # does not depend on an unrelated system-wide VC runtime installation.
@@ -34,12 +37,12 @@ target_include_directories(yohsai_solver
 
 target_compile_features(yohsai_solver PUBLIC cxx_std_20)
 target_compile_definitions(yohsai_solver PRIVATE YSC_BUILD_DLL)
-if(MSVC)
+if(OpenMP_CXX_FOUND)
     target_link_libraries(yohsai_solver PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 if(MSVC)
-    target_compile_options(yohsai_solver PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(yohsai_solver PRIVATE /W4 /permissive- /EHsc /openmp)
 else()
     target_compile_options(yohsai_solver PRIVATE -Wall -Wextra -Wpedantic)
 endif()

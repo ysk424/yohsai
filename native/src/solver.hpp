@@ -10,6 +10,12 @@
 
 namespace ysc {
 
+// Independent-set colors of a constraint family. Constraints in one color never
+// share a vertex, so a color may be projected with OpenMP without write races.
+// Colors themselves remain sequential (Gauss-Seidel across colors, Jacobi-like
+// within a color).
+using ColorGroups = std::vector<std::vector<int32_t>>;
+
 class Solver {
 public:
     Solver(const ysc_create_desc& desc, const ysc_config& config);
@@ -77,14 +83,22 @@ private:
     std::vector<int32_t> contact_correction_counts_;
     std::vector<int32_t> seam_driven_;
 
+    ColorGroups seam_colors_;
+    ColorGroups edge_colors_;
+    ColorGroups quad_colors_;
+    ColorGroups bend_colors_;
+
     void validate_config() const;
+    void build_color_groups();
     void project_seam_attraction();
     void integrate(const Vec3& gravity, float time_step);
     void update_seam_capture();
     void project_seams();
     void project_edge(const Edge& edge);
     void project_edges(bool reverse);
+    void project_quad(const Quad& quad);
     void project_quad_shear(bool reverse);
+    void project_bend(const Bend& bend);
     void project_bends(bool reverse);
     void project_distance(int32_t a, int32_t b, float target_length, float relaxation);
     void project_body_contacts(const int32_t* candidates, int32_t count);
