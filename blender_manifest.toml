@@ -8,7 +8,7 @@ maintainer = "Yohsai Developers"
 type = "add-on"
 
 blender_version_min = "5.1.0"
-platforms = ["windows-x64", "macos-arm64"]
+platforms = ["windows-x64"]
 
 license = ["SPDX:GPL-3.0-or-later"]
 
@@ -49,7 +49,6 @@ paths = [
     "LICENSE",
     "bin/yohsai_solver.dll",
     "bin/vcomp140.dll",
-    "bin/libyohsai_solver.dylib",
     "native/CMakeLists.txt",
     "native/include/yohsai_solver/c_api.h",
     "native/src/math.hpp",

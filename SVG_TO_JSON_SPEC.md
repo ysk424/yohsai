@@ -407,7 +407,7 @@ Gravity choice and fixed material values are runtime behavior rather than
 pattern data and do not alter the JSON contract. The two gravity buttons may be
 alternated during one live session. Material rest data is taken only from the
 pattern mesh; Body data is collision-only. The only product backend is the
-native CPU Square-Lattice library, packaged for Windows x64 and macOS arm64.
+native CPU Square-Lattice library, packaged for Windows x64.
 
 ## 13. Update
 

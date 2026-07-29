@@ -120,14 +120,12 @@ def _library_candidates() -> tuple[Path, ...]:
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
-    # Only search for the library flavour that matches the running platform.
-    # The combined (non-split) package ships every platform's binary side by
-    # side, so an unfiltered list would try to ctypes.CDLL a Windows .dll on
-    # macOS and abort before ever reaching the .dylib.
-    if sys.platform == "darwin":
-        names = ("libyohsai_solver.dylib",)
-    elif sys.platform.startswith("win"):
+    # Product packages are Windows x64 only. Other platforms may still load a
+    # self-built library if present under the usual names.
+    if sys.platform.startswith("win"):
         names = ("yohsai_solver.dll",)
+    elif sys.platform == "darwin":
+        names = ("libyohsai_solver.dylib",)
     else:
         names = ("libyohsai_solver.so",)
     search_dirs = (
@@ -218,7 +216,7 @@ def _load_library() -> ctypes.CDLL:
         return library
     raise NativeSolverError(
         "Native Kitsuke library was not found. "
-        "Build it with build_native.ps1 (Windows) or build_native.sh (macOS/Linux). "
+        "Build it with build_native.ps1 on Windows. "
         f"Searched: {', '.join(attempted)}"
     )
 

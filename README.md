@@ -179,34 +179,21 @@ Character silhouettes are exported separately with
 
 ## Platforms
 
-Yohsai ships as native per-platform packages and installs on:
-
-- **Windows x64** (`yohsai-<version>-windows_x64.zip`) — bundles
-  `yohsai_solver.dll` and the licensed `vcomp140.dll` OpenMP runtime;
-- **macOS Apple Silicon (arm64)** (`yohsai-<version>-macos_arm64.zip`) — bundles
-  `libyohsai_solver.dylib`.
-
-The Python solver bridge loads whichever native library matches the host, so a
-single build works on either platform once the matching package is installed.
-Intel macOS (x86_64) is not yet packaged.
+Yohsai ships for **Windows x64** only (`yohsai-<version>-windows_x64.zip`).
+The package bundles `yohsai_solver.dll` and the licensed `vcomp140.dll` OpenMP
+runtime. macOS packages are no longer maintained.
 
 ## Native development
 
-On Windows, Visual Studio 2022 Build Tools, CMake, and the standard OpenMP
-runtime are sufficient for the CPU backend:
+Visual Studio 2022 Build Tools, CMake, and the standard OpenMP runtime are
+sufficient for the CPU backend:
 
 ```powershell
 .\build_native.ps1 -Configuration Release
 ```
 
-On macOS (or Linux), use the shell script with CMake and a C++20 compiler:
-
-```bash
-./build_native.sh
-```
-
-Each script builds the native library and installs the runtime files
-(`.dll`/`.dylib`) into `bin/`.
+The script builds the native library and installs `yohsai_solver.dll` into
+`bin/`.
 
 ## License
 

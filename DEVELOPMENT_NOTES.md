@@ -82,8 +82,8 @@ tests against the code as it is when they are needed, and delete them again
 rather than let them drift.
 
 `blender_manifest.toml` `[build] paths` is the authoritative file list: current
-source, documentation, `bin/yohsai_solver.dll`, `bin/vcomp140.dll`, and
-`bin/libyohsai_solver.dylib`. Wheels come from the separate `wheels` key.
+source, documentation, `bin/yohsai_solver.dll`, and `bin/vcomp140.dll`.
+Wheels come from the separate `wheels` key.
 Build directories, caches, temporary files, local PDFs, and earlier ZIPs are
 excluded. Deleting a documentation file requires removing its `paths` entry too,
 or the build fails on the missing path.
