@@ -23,9 +23,10 @@ Status: current development state
 - Body participates only through contact correction, which dissipates only.
 - Self-contact and Body-relative rest-shape forces are absent.
 - Zero gravity and Normal gravity select 0 or 9.81 m/s² per click in world -Z.
-- Auto is event-driven rather than derived continuously from state. Load and
-  switching Auto on lock PLACED/DONE and unlock PENDING; switching it off
-  unlocks non-placed parts. GRAVITY completion never changes Lock.
+- Existing Lock (formerly Auto) is event-driven. Load and turning it on lock
+  PLACED/DONE and unlock PENDING; turning it off unlocks non-placed parts.
+  Select Lock is a button that toggles Lock on the selection. Both may be off;
+  both must not be on. GRAVITY completion never changes Lock by itself.
 - The product path always uses the native Square-Lattice solver. Normal GRAVITY
   uses 16 material iterations; Zero GRAVITY uses 24 (1.5x) so one press does
   more settle work relative to fixed Blender mesh round-trip cost.

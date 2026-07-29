@@ -128,7 +128,32 @@ def _apply_auto_lock_all(properties) -> None:
 
 
 def _update_auto_lock(properties, _context) -> None:
+    # Existing Lock and Select Lock cannot both be on. Existing Lock wins here.
+    if bool(properties.auto_lock) and bool(getattr(properties, "select_lock_mode", False)):
+        properties.select_lock_mode = False
     _apply_auto_lock_all(properties)
+
+
+def _update_select_lock_mode(properties, _context) -> None:
+    # Turning Select Lock on forces Existing Lock off (both-on is forbidden).
+    if bool(properties.select_lock_mode) and bool(properties.auto_lock):
+        properties.auto_lock = False
+        # auto_lock update already applied unlock of non-PLACED; re-assert selection
+        # locks after that if the mode is still on.
+    if bool(properties.select_lock_mode):
+        objects = _selected_mesh_objects()
+        parts = _lock_scope_parts(properties, objects)
+        targets = [obj for obj in objects if obj in parts]
+        for obj in targets:
+            obj[LOCKED_OBJECT_KEY] = True
+        if targets:
+            properties.parse_status = (
+                f"Select Lock on: locked {len(targets)} selected clothes part(s)."
+            )
+        else:
+            properties.parse_status = "Select Lock on: select clothes part(s) to lock."
+    else:
+        properties.parse_status = "Select Lock off."
 
 
 def _lock_scope_collections(properties, objects: list[Object]) -> list[Collection]:
@@ -158,22 +183,33 @@ def _lock_scope_parts(properties, objects: list[Object]) -> list[Object]:
     return scoped
 
 
-def _get_lock_selection(properties) -> bool:
-    objects = _selected_mesh_objects()
-    return bool(objects) and any(bool(obj.get(LOCKED_OBJECT_KEY, False)) for obj in objects)
-
-
-def _set_lock_selection(properties, value: bool) -> None:
+def _selection_lock_targets(properties) -> list[Object]:
     objects = _selected_mesh_objects()
     parts = _lock_scope_parts(properties, objects)
-    if not objects:
-        properties.parse_status = "Select clothes part(s) before changing Lock."
+    return [obj for obj in objects if obj in parts]
+
+
+def _toggle_select_lock(properties) -> None:
+    """Toggle Select Lock mode. Mutually exclusive with Existing Lock when on."""
+    objects = _selected_mesh_objects()
+    targets = _selection_lock_targets(properties)
+    if not objects or not targets:
+        properties.parse_status = "Select clothes part(s) before Select Lock."
         return
-    targets = [obj for obj in objects if obj in parts]
+    if properties.select_lock_mode:
+        # Mode off: unlock the current selection (same attribute as before).
+        properties.select_lock_mode = False
+        for obj in targets:
+            obj[LOCKED_OBJECT_KEY] = False
+        properties.parse_status = f"Select Lock off: unlocked {len(targets)} selected part(s)."
+        return
+    # Mode on: Existing Lock must be off, then lock selection.
+    if properties.auto_lock:
+        properties.auto_lock = False
+    properties.select_lock_mode = True
     for obj in targets:
-        obj[LOCKED_OBJECT_KEY] = bool(value)
-    action = "Locked" if value else "Unlocked"
-    properties.parse_status = f"{action} {len(targets)} selected clothes part(s) for GRAVITY."
+        obj[LOCKED_OBJECT_KEY] = True
+    properties.parse_status = f"Select Lock on: locked {len(targets)} selected part(s)."
 
 
 def _parser_data_dir() -> str:
@@ -335,15 +371,17 @@ class YohsaiProperties(PropertyGroup):
         type=Object,
         poll=_mesh_object_poll,
     )
-    lock_selection: BoolProperty(
-        name="Lock",
-        description="Independent deformation Lock for selected clothes parts",
-        get=_get_lock_selection,
-        set=_set_lock_selection,
+    # Mode flag for the Select Lock button (pressed look). Independent of the
+    # per-part LOCKED_OBJECT_KEY; both-on with auto_lock is forbidden.
+    select_lock_mode: BoolProperty(
+        name="Select Lock",
+        description="Lock selected clothes parts; cannot be on together with Existing Lock",
+        default=False,
+        update=_update_select_lock_mode,
     )
     auto_lock: BoolProperty(
-        name="Auto",
-        description="Apply Auto-lock to placement-state and Gravity-completed parts",
+        name="Existing Lock",
+        description="Lock PLACED and DONE parts; cannot be on together with Select Lock",
         default=True,
         update=_update_auto_lock,
     )
@@ -644,8 +682,14 @@ class YOHSAI_PT_main(Panel):
         inputs.prop(props, "clothes_collection")
         inputs.prop(props, "body_object")
         lock_row = inputs.row(align=True)
-        lock_row.prop(props, "lock_selection")
-        lock_row.prop(props, "auto_lock", text="Auto", toggle=True)
+        # Select Lock: operator button (toggle look via depress).
+        lock_row.operator(
+            YOHSAI_OT_lock_selection.bl_idname,
+            text="Select Lock",
+            depress=bool(props.select_lock_mode),
+        )
+        # Existing Lock: former Auto.
+        lock_row.prop(props, "auto_lock", text="Existing Lock", toggle=True)
         layout.separator(factor=0.4)
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
@@ -657,10 +701,31 @@ class YOHSAI_PT_main(Panel):
         layout.label(text=props.parse_status)
 
 
+class YOHSAI_OT_lock_selection(Operator):
+    bl_idname = "yohsai.lock_selection"
+    bl_label = "Select Lock"
+    bl_description = (
+        "Lock or unlock selected clothes parts. "
+        "Cannot be on together with Existing Lock"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def execute(self, context):
+        props = context.scene.yohsai
+        _toggle_select_lock(props)
+        self.report({"INFO"}, props.parse_status)
+        return {"FINISHED"}
+
+
 _classes = (
     YohsaiProperties,
     YOHSAI_OT_load_svg,
     YOHSAI_OT_update_svg,
+    YOHSAI_OT_lock_selection,
     YOHSAI_OT_kitsuke_zero_gravity,
     YOHSAI_OT_kitsuke,
     YOHSAI_OT_prepare_zozo,

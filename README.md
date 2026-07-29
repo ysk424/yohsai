@@ -33,12 +33,12 @@ Every part has two independent attributes: the monotonic `PLACED` -> `PENDING`
 its state to `DONE` without changing that Lock. It therefore remains deformable
 for repeated GRAVITY clicks.
 
-Load turns `Auto` on and performs one Auto-lock operation: `PLACED` and existing
-`DONE` parts are locked, while pending parts are unlocked. Turning Auto off
-immediately unlocks every non-placed part; turning it on performs the Auto-lock
-operation again. A `PLACED` part remains outside the simulation. `Lock` directly
-changes the same independent deformation attribute on selected clothes parts.
-The Auto control is a colored toggle whose pressed state shows that it is on.
+Load turns **Existing Lock** (formerly Auto) on and locks `PLACED` and existing
+`DONE` parts; pending parts stay unlocked. Turning Existing Lock off unlocks
+every non-placed part; turning it on applies that rule again. A `PLACED` part
+remains outside the simulation. **Select Lock** is a button that locks or
+unlocks the selected clothes parts (same deformation Lock attribute). Existing
+Lock and Select Lock cannot both be on; both may be off.
 
 ## Interface language
 
