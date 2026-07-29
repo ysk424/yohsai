@@ -104,8 +104,8 @@ Pattern attributes define every material rest value. The render-triangulation
 diagonal carries no spring, and no material term reads Body shape, normals, or
 bones. The Body may influence particles only through collision contact.
 
-Every click uses eight 1/240-second substeps, 20 material/contact iterations, an
-8 mm-per-substep seam closure with 2 mm capture, and 5 mm contact thickness.
+Every click uses eight 1/240-second substeps, 16 material/contact iterations, a
+16 mm-per-substep seam closure with 2 mm capture, and 5 mm contact thickness.
 Sewing moves the pair kinematically and adds no momentum. `Zero gravity` applies 0 m/s² and `Normal gravity` applies 9.81 m/s²
 in world -Z. The two buttons may be alternated without resetting the live
 simulation.

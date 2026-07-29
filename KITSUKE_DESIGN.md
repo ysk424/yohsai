@@ -145,16 +145,17 @@ Self-contact is absent.
 - time step: 1/240 s;
 - substeps per click: 8;
 - gravity per click: either 0 or 9.81 m/s² in world -Z;
-- material/contact iterations: fixed at 20;
-- seam closure: 8 mm per substep, applied once as a position change;
+- material/contact iterations: fixed at 16;
+- seam closure: 16 mm per substep, applied once as a position change;
 - seam capture distance: 2 mm;
-- edge stretch relaxation per sweep: 1.0, with four alternating sweeps;
+- edge stretch relaxation per sweep: 1.0, with two alternating sweeps;
 - crimp reserve before an edge becomes a hard wall: 5% of rest length;
 - quad shear relaxation per iteration: 0.02;
 - axial bend relaxation per iteration: 0.02;
 - maximum position correction per projection: 5 mm;
 - Body candidate radius: 40 mm;
-- Body contact thickness: 5 mm.
+- Body contact thickness: 5 mm;
+- Body contact frequency: every other material iteration, and always the last.
 
 Every value above is `ysc_default_config()` in `native/src/solver.cpp`, except
 the iteration count, which the Blender layer passes per click
@@ -168,10 +169,13 @@ is always the native CPU Square-Lattice Cloth library; there is no solver
 selection.
 
 There is no sweep phase after the iteration loop. Each iteration runs seam
-capture, captured seams, quad shear, axial bend, four alternating edge sweeps,
-then Body contact. The edge sweeps repeat inside the iteration, and run last
-among the material terms, so the strong sewing load converges into the lattice
-and a stitch vertex cannot run ahead and leave a torn one-edge spike.
+capture, captured seams, quad shear, axial bend, and two alternating edge
+sweeps; Body contact runs on even iterations and the final iteration. Edge
+sweeps run last among the material terms so the strong sewing load converges
+into the lattice and a stitch vertex cannot run ahead and leave a torn
+one-edge spike. OpenMP colouring already propagates corrections across the
+colour diameter of the lattice, so two alternating sweeps replace the older
+four pure-serial hops.
 
 ## Editing and recovery
 

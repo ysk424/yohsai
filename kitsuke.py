@@ -29,7 +29,7 @@ from .mesh_loader import (
 
 
 STEPS_PER_CLICK = 8
-SOLVER_ITERATIONS = 20
+SOLVER_ITERATIONS = 16
 MIN_SOLVER_ITERATIONS = 1
 MAX_SOLVER_ITERATIONS = 128
 COLLISION_SEARCH_M = 0.04
@@ -477,15 +477,18 @@ def _body_collision_candidates(
     )
     if eligible is not None:
         candidate_mask &= eligible
+    # Reuse one Vector to avoid per-vertex allocation in the BVH query path.
+    query = Vector((0.0, 0.0, 0.0))
     for vertex_index in np.flatnonzero(candidate_mask):
         point = positions[vertex_index]
+        query.x = float(point[0])
+        query.y = float(point[1])
+        query.z = float(point[2])
         _location, _normal, face_index, _distance = body.bvh.find_nearest(
-            Vector(tuple(float(value) for value in point)), COLLISION_SEARCH_M
+            query, COLLISION_SEARCH_M
         )
         if face_index is None and _inside_body(body, point):
-            _location, _normal, face_index, _distance = body.bvh.find_nearest(
-                Vector(tuple(float(value) for value in point))
-            )
+            _location, _normal, face_index, _distance = body.bvh.find_nearest(query)
         if face_index is not None:
             pairs.append((vertex_index, int(face_index)))
     if not pairs:

@@ -33,8 +33,9 @@ typedef struct ysc_config {
     float time_step;
     int32_t substeps;
     int32_t iterations;
-    /* Per-iteration closure distance for an uncaptured seam pair, in metres.
-       Constant, so pair distance does not change the closing rate. */
+    /* Per-substep closure distance for an uncaptured seam pair, in metres.
+       Constant, so pair distance does not change the closing rate. Applied
+       once ahead of prediction; iterations do not multiply this distance. */
     float seam_attraction_step;
     float seam_capture_distance;
     /* Per-iteration material energy-projection fractions in [0, 1]. */

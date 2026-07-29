@@ -36,11 +36,11 @@ Letting a span collapse instead makes compression a one-way ratchet, because a
 span shorter than rest would never be visited again, and the panel silently
 loses the dimensions the pattern authored.
 
-Because a Gauss-Seidel pass carries a length correction only about one span
-further into the sheet, the edge sweeps repeat within each iteration. A single
-pass per iteration never reaches the middle of a panel, which is the part
-furthest from any anchor, and the lattice then grows under load instead of
-settling onto its authored spacing.
+Because a pure serial Gauss-Seidel pass carries a length correction only about
+one span further into the sheet, edge sweeps used to repeat four times per
+iteration. With OpenMP colouring, colours already walk sequentially, so one
+forward pass and one reverse pass per iteration are enough to reach the middle
+of a panel and keep the lattice on its authored spacing under sewing load.
 
 For an ordered quad `(x0, x1, x2, x3)`, the averaged material spans are
 
@@ -69,13 +69,16 @@ Each substep performs:
 1. a distance-independent positional seam drag for every uncaptured pair;
 2. velocity/position prediction from existing velocity and gravity;
 3. seam-capture detection, then iterative captured-seam, quad-shear,
-   axial-bend, and edge sweeps;
-4. Body contact correction for supplied candidates;
+   axial-bend, and two alternating edge sweeps;
+4. Body contact correction for supplied candidates on every other material
+   iteration (and always the last iteration of the substep);
 5. velocity reconstruction from the accepted position change.
 
-Forward and reverse sweeps alternate to reduce ordering bias. Every local
-correction is mass weighted and bounded. The uncaptured seam closure is a fixed
-distance, independent of how far apart the pair still is. At 2 mm or after
+Forward and reverse edge sweeps alternate to reduce ordering bias. With OpenMP
+colouring, one edge sweep already propagates across the colour diameter, so a
+second reverse pass is enough. Every local correction is mass weighted and
+bounded. The uncaptured seam closure is a fixed distance (default 16 mm per
+substep), independent of how far apart the pair still is. At 2 mm or after
 endpoint crossing, the pair is captured at zero distance. There is no
 seam-target shortening, Body attraction, shape matching, self-contact, or speed
 clamp.

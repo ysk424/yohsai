@@ -26,7 +26,8 @@ Status: current development state
 - Auto is event-driven rather than derived continuously from state. Load and
   switching Auto on lock PLACED/DONE and unlock PENDING; switching it off
   unlocks non-placed parts. GRAVITY completion never changes Lock.
-- The product path always uses the native Square-Lattice solver at 20 iterations.
+- The product path always uses the native Square-Lattice solver at 16 iterations.
+- Uncaptured seams close 16 mm per substep (constant kinematic drag, no momentum).
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.
 - Update recuts meshes from stable panel labels.

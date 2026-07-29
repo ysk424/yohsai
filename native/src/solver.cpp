@@ -78,7 +78,9 @@ ysc_config default_config() {
     config.time_step = 1.0F / 240.0F;
     config.substeps = 8;
     config.iterations = 16;
-    config.seam_attraction_step = 0.008F;
+    // Constant kinematic closure per substep (metres). Larger values sew
+    // panels shut faster; capture still finishes the last 2 mm.
+    config.seam_attraction_step = 0.016F;
     config.seam_capture_distance = 0.002F;
     config.stretch_relaxation = 1.0F;
     config.shear_relaxation = 0.02F;
@@ -371,7 +373,11 @@ void Solver::project_seam_attraction() {
     // force.  Neither this pull nor the material's reaction to it may become
     // momentum, or the pair accelerates itself across the substeps.
     std::fill(seam_driven_.begin(), seam_driven_.end(), 0);
-    for (const Seam& seam : seams_) {
+    const int32_t seam_count = static_cast<int32_t>(seams_.size());
+    // Seams are few and usually vertex-disjoint after colouring, but attraction
+    // runs once per substep serially so seam_driven_ writes stay simple.
+    for (int32_t index = 0; index < seam_count; ++index) {
+        const Seam& seam = seams_[static_cast<size_t>(index)];
         if (seam.captured) {
             continue;
         }
@@ -805,26 +811,23 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             project_bends(reverse);
             // Keep the material edges last: shear and curvature may rearrange a
             // cell, but they must never leave its warp/weft span torn open.
-            // These sweeps repeat because a Gauss-Seidel pass carries a length
-            // correction only about one span further into the sheet, so a single
-            // pass per iteration leaves the middle of a panel — the part
-            // furthest from any anchor — never reached, and the lattice grows
-            // instead of settling onto its authored spacing.
             //
-            // Coloured OpenMP replaces pure sequential GS order with independent
-            // sets: within a colour the projections are race-free and parallel,
-            // but neighbouring constraints only see updates from earlier
-            // colours.  That changes both convergence and the settled pose
-            // relative to a single ordered sweep.
+            // Coloured OpenMP already walks colours sequentially, so one
+            // project_edges call propagates across the colour diameter of the
+            // lattice.  A second reverse pass reduces order bias without the
+            // cost of four pure-serial Gauss-Seidel hops.
             project_edges(reverse);
             project_edges(!reverse);
-            project_edges(reverse);
-            project_edges(!reverse);
-            project_body_contacts(desc.body_candidates, desc.body_candidate_count);
+            // Contact every other iteration (and always the last) halves the
+            // serial candidate walk while still peeling deep penetrations over
+            // the click; finish_substep reads the latest contact flags.
+            if ((iteration & 1) == 0 || iteration + 1 == iterations) {
+                project_body_contacts(desc.body_candidates, desc.body_candidate_count);
+            }
         }
         finish_substep(config_.time_step);
-        require_finite_state();
     }
+    require_finite_state();
 
     ysc_stats stats{};
     stats.substeps = config_.substeps;
