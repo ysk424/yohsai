@@ -3,9 +3,15 @@
 Status: current Load mesh contract
 
 The PDF page defines warp vertically and weft horizontally. Load samples a
-global 10 mm square lattice (`MESH_SPACING_M` in `mesh_loader.py`), triangulates
-it for Blender rendering and collision, and retains pattern coordinates and
-grainline attributes for material use.
+square lattice per panel (`MESH_SPACING_M` = 10 mm by default in
+`mesh_loader.py`), triangulates it for Blender rendering and collision, and
+retains pattern coordinates and grainline attributes for material use.
+
+Panels whose shorter pattern-page side is at most
+`FINE_MESH_MAX_SHORT_SIDE_M` (5 cm) use `FINE_MESH_SPACING_M` (5 mm) so small
+pieces keep enough cells. Large panels stay on 10 mm so tension still
+propagates. Mixed-resolution seams equalize to the coarser side's vertex count
+before 1:1 pairing (the fine boundary sparsifies; interior stays fine).
 
 Stored attributes include `yohsai_pattern_position`,
 `yohsai_grainline_family`, `yohsai_grainline_quad`, sewing membership, and fold

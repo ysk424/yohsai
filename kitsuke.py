@@ -719,11 +719,11 @@ def clear_kitsuke_session(collection: bpy.types.Collection | None) -> None:
 
 def adapt_seam_counts(context, collection: bpy.types.Collection | None) -> set[str]:
     """Equalize every sewing seam's two sides to matching vertex counts so they
-    pair 1:1 (the longer edge gathers between its matched vertices).
+    pair 1:1.
 
-    Only mismatched panels are recut, and when nothing needs adapting the pass
-    is a no-op.  A recut changes topology, so the now-stale kitsuke session and
-    persisted state are dropped and sewing rebuilds on the new meshes.
+    Same-pitch seams keep the longer side (gather). Mixed 10 mm / 5 mm seams
+    keep the coarser side. Only mismatched panels are recut; a no-op when
+    already matched. A recut drops the kitsuke session so sewing rebuilds.
     """
     if collection is None:
         return set()

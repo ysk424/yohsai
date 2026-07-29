@@ -16,6 +16,11 @@ from mathutils.geometry import barycentric_transform, delaunay_2d_cdt
 
 
 MESH_SPACING_M = 0.01
+# Small panels keep a finer interior lattice so short pieces still read as cloth.
+# Large panels stay on the 10 mm lattice so tension can propagate without a full
+# 5 mm global mesh (which tends to break the square-lattice solve).
+FINE_MESH_SPACING_M = 0.005
+FINE_MESH_MAX_SHORT_SIDE_M = 0.05  # 5 cm; constant knob, not a derived law
 PANEL_GAP_M = 0.10
 WORLD_Y_M = -1.0
 BOTTOM_Z_M = 0.01
@@ -172,6 +177,7 @@ class PanelGeometry:
     quads: list[tuple[int, int, int, int]]
     face_quads: dict[tuple[int, ...], int]
     ring_closed: bool
+    spacing_m: float = MESH_SPACING_M
 
 
 def _point(value: object, field: str) -> Vector:
@@ -184,6 +190,50 @@ def _point(value: object, field: str) -> Vector:
     if not all(math.isfinite(component) for component in result):
         raise MeshLoadError(f"{field} contains a non-finite coordinate.")
     return result
+
+
+def _panel_pattern_bounds(panel: dict[str, Any]) -> tuple[float, float, float, float]:
+    """Return axis-aligned pattern-page bounds of a panel's authored segments."""
+    xs: list[float] = []
+    ys: list[float] = []
+    segments = panel.get("segments")
+    if not isinstance(segments, list):
+        return 0.0, 0.0, 0.0, 0.0
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        for key in ("start", "end", "control1", "control2"):
+            value = segment.get(key)
+            if not isinstance(value, list) or len(value) != 2:
+                continue
+            try:
+                x = float(value[0])
+                y = float(value[1])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(x) and math.isfinite(y):
+                xs.append(x)
+                ys.append(y)
+    if not xs or not ys:
+        return 0.0, 0.0, 0.0, 0.0
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def _panel_spacing_m(panel: dict[str, Any]) -> float:
+    """Choose 5 mm for small panels, otherwise the default 10 mm lattice."""
+    min_x, max_x, min_y, max_y = _panel_pattern_bounds(panel)
+    short_side = min(max_x - min_x, max_y - min_y)
+    if short_side <= FINE_MESH_MAX_SHORT_SIDE_M:
+        return FINE_MESH_SPACING_M
+    return MESH_SPACING_M
+
+
+def _object_spacing_m(obj: bpy.types.Object) -> float:
+    try:
+        spacing = float(obj.get("yohsai_mesh_spacing_m", MESH_SPACING_M))
+    except (TypeError, ValueError):
+        return MESH_SPACING_M
+    return spacing if spacing > 0.0 and math.isfinite(spacing) else MESH_SPACING_M
 
 
 def _distance(a: Vector, b: Vector) -> float:
@@ -820,16 +870,17 @@ def _triangulate_panel(
         quads=quads,
         face_quads=face_quads,
         ring_closed=ring_closed,
+        spacing_m=spacing,
     )
 
 
 def _panel_geometries(
     panels: list[dict[str, Any]],
-    spacing: float,
     seam_counts_by_panel: dict[str, dict[str, int]] | None = None,
 ) -> list[PanelGeometry]:
     result: list[PanelGeometry] = []
     for panel in panels:
+        spacing = _panel_spacing_m(panel)
         seam_counts = (seam_counts_by_panel or {}).get(str(panel.get("id", "")))
         if bool(panel.get("mirror", False)):
             result.append(_triangulate_panel(panel, spacing, "LEFT", seam_counts))
@@ -979,7 +1030,7 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
 
     if not all(isinstance(panel, dict) for panel in panels_json):
         raise MeshLoadError("Yohsai JSON contains an invalid panel.")
-    panels = _panel_geometries(panels_json, MESH_SPACING_M)
+    panels = _panel_geometries(panels_json)
     _pack_panels(panels, PANEL_GAP_M)
 
     name = _next_clothes_name()
@@ -1009,7 +1060,7 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
             obj["yohsai_role"] = "part"
             obj["yohsai_collection"] = name
             obj["yohsai_source_svg"] = str(source.get("svg_path", ""))
-            obj["yohsai_mesh_spacing_m"] = MESH_SPACING_M
+            obj["yohsai_mesh_spacing_m"] = panel.spacing_m
             obj["yohsai_panel_id"] = panel.panel_id
             obj["yohsai_panel_label"] = panel.update_label or ""
             obj["yohsai_panel_instance"] = panel.instance_id
@@ -1157,7 +1208,7 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
     )
     if not all(isinstance(panel, dict) for panel in panels_json):
         raise UpdateError("Updated Yohsai JSON contains an invalid panel.")
-    panels = _panel_geometries(panels_json, MESH_SPACING_M)
+    panels = _panel_geometries(panels_json)
     if len(parts) != len(panels):
         raise UpdateError(f"Panel object count changed: expected {len(parts)}, found {len(panels)}.")
     old_by_instance: dict[str, bpy.types.Object] = {}
@@ -1208,7 +1259,7 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
         old_meshes.append(obj.data)
         obj.data = mesh
         obj["yohsai_source_svg"] = new_source
-        obj["yohsai_mesh_spacing_m"] = MESH_SPACING_M
+        obj["yohsai_mesh_spacing_m"] = panel.spacing_m
         obj["yohsai_panel_id"] = panel.panel_id
         obj["yohsai_panel_label"] = panel.update_label
         obj["yohsai_panel_instance"] = panel.instance_id
@@ -1681,11 +1732,14 @@ def compute_seam_count_overrides(
     vertices and pair 1:1 (the longer edge then gathers between its matched
     vertices).
 
-    The longer side is kept and the shorter side is resampled up to match it.
-    For an armhole the sleeve is a closed ring while the body armhole is the
-    composite of the front and back open chains, so the ring's vertex budget is
-    shared across the body panels in proportion to their arc lengths.  Panels
-    whose sides already match are omitted, which keeps the pass idempotent.
+    Same-resolution seams keep the longer side and resample the shorter side up
+    so gather still works. Mixed 10 mm / 5 mm seams instead take the coarser
+    (10 mm) side's count: the fine boundary is sparsified to match, which is
+    equivalent to pairing every other fine vertex and avoids densifying the
+    large panel. For an armhole the sleeve is a closed ring while the body
+    armhole is the composite of the front and back open chains, so the ring's
+    vertex budget is shared across the body panels in proportion to their arc
+    lengths. Panels whose sides already match are omitted (idempotent).
     """
     parts = tuple(
         obj for obj in collection.objects
@@ -1733,11 +1787,17 @@ def compute_seam_count_overrides(
 
         if closed_objs:
             # Ring-composite armhole: closed sleeve ring <-> composite body loop.
-            target = max(_rep_verts(chains) for chains in closed_objs.values())
+            # Prefer the coarser closed path when a fine mesh is mixed in.
+            closed_spacings = {_object_spacing_m(obj) for obj in closed_objs}
+            if max(closed_spacings) - min(closed_spacings) > 1.0e-12:
+                coarse = max(closed_objs, key=_object_spacing_m)
+                target = _rep_verts(closed_objs[coarse])
+            else:
+                target = max(_rep_verts(chains) for chains in closed_objs.values())
             if not open_objs:
                 continue
             current = sum(_rep_verts(chains) for chains in open_objs.values())
-            if current >= target:
+            if current == target:
                 continue
             lengths = {obj: _rep_length(chains) for obj, chains in open_objs.items()}
             total = sum(lengths.values())
@@ -1745,23 +1805,37 @@ def compute_seam_count_overrides(
                 continue
             count = len(open_objs)
             budget = target - count  # composite verts = sum(edges_i + 1) = target
+            if budget < count:
+                continue
             raw = {obj: budget * lengths[obj] / total for obj in open_objs}
-            edges = {obj: int(math.floor(value)) for obj, value in raw.items()}
+            edges = {obj: max(1, int(math.floor(value))) for obj, value in raw.items()}
             remainder = budget - sum(edges.values())
             order = sorted(open_objs, key=lambda obj: raw[obj] - edges[obj], reverse=True)
             for index in range(max(0, remainder)):
                 edges[order[index % count]] += 1
             for obj in open_objs:
-                _add(_panel_id(obj), label, edges[obj])
+                desired = edges[obj]
+                actual = _rep_verts(open_objs[obj]) - 1
+                if actual != desired:
+                    _add(_panel_id(obj), label, desired)
         else:
             # Direct open <-> open seam on exactly two panels.
             if len(open_objs) != 2:
                 continue
             verts = {obj: _rep_verts(chains) for obj, chains in open_objs.items()}
-            target = max(verts.values())
+            spacings = {obj: _object_spacing_m(obj) for obj in open_objs}
+            spacing_values = list(spacings.values())
+            if abs(spacing_values[0] - spacing_values[1]) > 1.0e-12:
+                # Mixed resolution: keep the coarser side; sparsify/densify the
+                # other so both boundaries share that count (1-skip equivalent).
+                coarse = max(open_objs, key=_object_spacing_m)
+                target = verts[coarse]
+            else:
+                # Same pitch: longer side wins so gather still bunches fabric.
+                target = max(verts.values())
             for obj, value in verts.items():
-                if value < target:
-                    _add(_panel_id(obj), label, target - 1)
+                if value != target:
+                    _add(_panel_id(obj), label, max(1, target - 1))
     return overrides
 
 
@@ -1815,7 +1889,7 @@ def remesh_with_seam_counts(
         (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
         key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
     )
-    panels = _panel_geometries(panels_json, MESH_SPACING_M, overrides)
+    panels = _panel_geometries(panels_json, overrides)
     if len(parts) != len(panels):
         raise UpdateError(f"Stored panel count {len(panels)} does not match {len(parts)} parts.")
     old_by_instance = {
@@ -1826,7 +1900,7 @@ def remesh_with_seam_counts(
     if set(old_by_instance) != set(new_by_instance):
         raise UpdateError("The stored pattern no longer matches the current parts; press Update first.")
 
-    prepared: list[tuple[bpy.types.Object, bpy.types.Mesh]] = []
+    prepared: list[tuple[bpy.types.Object, bpy.types.Mesh, PanelGeometry]] = []
     try:
         for instance_id, obj in old_by_instance.items():
             panel = new_by_instance[instance_id]
@@ -1842,18 +1916,19 @@ def remesh_with_seam_counts(
             _write_panel_mesh_attributes(mesh, panel, int(obj.get("yohsai_panel_index", 0)))
             for material in obj.data.materials:
                 mesh.materials.append(material)
-            prepared.append((obj, mesh))
+            prepared.append((obj, mesh, panel))
     except Exception:
-        for _obj, mesh in prepared:
+        for _obj, mesh, _panel in prepared:
             if mesh.users == 0:
                 bpy.data.meshes.remove(mesh)
         raise
 
     changed: set[str] = set()
     old_meshes: list[bpy.types.Mesh] = []
-    for obj, mesh in prepared:
+    for obj, mesh, panel in prepared:
         old_meshes.append(obj.data)
         obj.data = mesh
+        obj["yohsai_mesh_spacing_m"] = panel.spacing_m
         changed.add(obj.name)
     if changed:
         remove_sewn_preview(collection)
