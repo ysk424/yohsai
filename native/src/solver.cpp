@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -234,7 +236,126 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
     seam_driven_.resize(vertices_.size());
     body_bvh_.build(body_positions_, body_faces_);
     build_color_groups();
+#if defined(YSC_ENABLE_CUDA)
+    init_material_cuda();
+#endif
     require_finite_state();
+}
+
+#if defined(YSC_ENABLE_CUDA)
+void Solver::init_material_cuda() {
+    material_cuda_.reset();
+    if (!MaterialCuda::device_available()) {
+        return;
+    }
+    cuda_pos_pack_.resize(vertices_.size() * 3);
+    cuda_seam_captured_.resize(seams_.size());
+    cuda_locked_pack_.resize(vertices_.size());
+    cuda_inv_mass_pack_.resize(vertices_.size());
+    for (size_t i = 0; i < vertices_.size(); ++i) {
+        cuda_inv_mass_pack_[i] = vertices_[i].inverse_mass;
+        cuda_locked_pack_[i] = vertices_[i].locked ? 1 : 0;
+    }
+    std::vector<MaterialCuda::Edge> edges;
+    edges.reserve(edges_.size());
+    for (const Edge& e : edges_) {
+        edges.push_back({e.a, e.b, e.rest_length});
+    }
+    std::vector<MaterialCuda::Quad> quads;
+    quads.reserve(quads_.size());
+    for (const Quad& q : quads_) {
+        quads.push_back({
+            q.vertices[0],
+            q.vertices[1],
+            q.vertices[2],
+            q.vertices[3],
+            q.rest_u_squared,
+            q.rest_v_squared,
+            q.rest_shear,
+        });
+    }
+    std::vector<MaterialCuda::Bend> bends;
+    bends.reserve(bends_.size());
+    for (const Bend& b : bends_) {
+        bends.push_back({
+            b.vertices[0],
+            b.vertices[1],
+            b.vertices[2],
+            b.previous_rest_length,
+            b.next_rest_length,
+        });
+    }
+    std::vector<MaterialCuda::Seam> seams;
+    seams.reserve(seams_.size());
+    for (const Seam& s : seams_) {
+        seams.push_back({s.a, s.b, s.target_length});
+    }
+    auto backend = std::make_unique<MaterialCuda>();
+    if (!backend->init(
+            static_cast<int32_t>(vertices_.size()),
+            cuda_inv_mass_pack_.data(),
+            cuda_locked_pack_.data(),
+            edges,
+            edge_colour_offsets_,
+            edge_colour_indices_,
+            quads,
+            quad_colour_offsets_,
+            quad_colour_indices_,
+            bends,
+            bend_colour_offsets_,
+            bend_colour_indices_,
+            seams,
+            seam_colour_offsets_,
+            seam_colour_indices_)) {
+        return;
+    }
+    MaterialCuda::Params params{};
+    params.stretch_relaxation = config_.stretch_relaxation;
+    params.shear_relaxation = config_.shear_relaxation;
+    params.bend_relaxation = config_.bend_relaxation;
+    params.stretch_limit = config_.stretch_limit;
+    params.maximum_position_correction = config_.maximum_position_correction;
+    backend->set_params(params);
+    material_cuda_ = std::move(backend);
+}
+
+bool Solver::cuda_materials_ready() const noexcept {
+    return material_cuda_ && material_cuda_->ready();
+}
+
+void Solver::pack_positions_to_cuda_buffer() {
+    for (size_t i = 0; i < vertices_.size(); ++i) {
+        cuda_pos_pack_[i * 3 + 0] = vertices_[i].position.x;
+        cuda_pos_pack_[i * 3 + 1] = vertices_[i].position.y;
+        cuda_pos_pack_[i * 3 + 2] = vertices_[i].position.z;
+        cuda_locked_pack_[i] = vertices_[i].locked ? 1 : 0;
+    }
+}
+
+void Solver::unpack_positions_from_cuda_buffer() {
+    for (size_t i = 0; i < vertices_.size(); ++i) {
+        vertices_[i].position = {
+            cuda_pos_pack_[i * 3 + 0],
+            cuda_pos_pack_[i * 3 + 1],
+            cuda_pos_pack_[i * 3 + 2],
+        };
+    }
+}
+
+void Solver::pack_seam_captured_to_cuda() {
+    for (size_t i = 0; i < seams_.size(); ++i) {
+        cuda_seam_captured_[i] = seams_[i].captured ? 1 : 0;
+    }
+}
+#endif
+
+void Solver::project_materials(bool reverse) {
+    // CPU path only. CUDA advance keeps positions on-device across iterations.
+    project_seams();
+    project_quad_shear(reverse);
+    project_bends(reverse);
+    project_edges(reverse);
+    project_edges(!reverse);
 }
 
 void Solver::flatten_colors(
@@ -962,6 +1083,35 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
 
     last_auto_candidate_count_ = 0;
     const int32_t external_candidates = auto_body ? 0 : desc.body_candidate_count;
+#if defined(YSC_ENABLE_CUDA)
+    // Below ~20k edges, OpenMP on 9950X3D usually beats CUDA because each
+    // contact pass still needs host BVH + H2D/D2H. Prefer GPU when the
+    // material workload dominates (full kimono / finer lattice).
+    bool use_cuda_materials = cuda_materials_ready() && edges_.size() >= 20000;
+#if defined(_MSC_VER)
+    char* force = nullptr;
+    size_t force_len = 0;
+    if (_dupenv_s(&force, &force_len, "YSC_FORCE_MATERIAL") == 0 && force != nullptr) {
+        if (std::strcmp(force, "cuda") == 0) {
+            use_cuda_materials = cuda_materials_ready();
+        } else if (std::strcmp(force, "cpu") == 0) {
+            use_cuda_materials = false;
+        }
+        free(force);
+    }
+#else
+    const char* force = std::getenv("YSC_FORCE_MATERIAL");
+    if (force != nullptr) {
+        if (std::strcmp(force, "cuda") == 0) {
+            use_cuda_materials = cuda_materials_ready();
+        } else if (std::strcmp(force, "cpu") == 0) {
+            use_cuda_materials = false;
+        }
+    }
+#endif
+#else
+    const bool use_cuda_materials = false;
+#endif
     for (int32_t substep = 0; substep < config_.substeps; ++substep) {
         // Ahead of the prediction, so integrate() rebases `previous` onto the
         // dragged position and the pull itself contributes no velocity.  Once
@@ -970,33 +1120,61 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
         project_seam_attraction();
         integrate(gravity, config_.time_step);
         update_seam_capture();
+#if defined(YSC_ENABLE_CUDA)
+        if (use_cuda_materials) {
+            // Keep cloth positions on the device for the whole substep's
+            // material iterations; only bounce through host for Body contact.
+            pack_positions_to_cuda_buffer();
+            pack_seam_captured_to_cuda();
+            material_cuda_->upload_positions(cuda_pos_pack_.data());
+            material_cuda_->upload_locked(cuda_locked_pack_.data());
+            material_cuda_->upload_seam_captured(
+                cuda_seam_captured_.data(), static_cast<int32_t>(seams_.size()));
+        }
+#endif
         for (int32_t iteration = 0; iteration < iterations; ++iteration) {
             const bool reverse = (iteration & 1) != 0;
-            update_seam_capture();
-            project_seams();
-            project_quad_shear(reverse);
-            project_bends(reverse);
-            // Keep the material edges last: shear and curvature may rearrange a
-            // cell, but they must never leave its warp/weft span torn open.
-            //
-            // Coloured OpenMP already walks colours sequentially, so one
-            // project_edges call propagates across the colour diameter of the
-            // lattice.  A second reverse pass reduces order bias without the
-            // cost of four pure-serial Gauss-Seidel hops.
-            project_edges(reverse);
-            project_edges(!reverse);
+#if defined(YSC_ENABLE_CUDA)
+            if (use_cuda_materials) {
+                // Capture is evaluated on host at substep start; mid-substep
+                // re-capture would force a download every iteration.
+                material_cuda_->project_materials(reverse);
+            } else
+#endif
+            {
+                update_seam_capture();
+                project_materials(reverse);
+            }
             // Contact every other iteration (and always the last). Auto mode
             // gathers nearest body faces once per substep on the first contact
             // pass, then reuses those pairs for later contact passes.
             if ((iteration & 1) == 0 || iteration + 1 == iterations) {
+#if defined(YSC_ENABLE_CUDA)
+                if (use_cuda_materials) {
+                    material_cuda_->download_positions(cuda_pos_pack_.data());
+                    unpack_positions_from_cuda_buffer();
+                }
+#endif
                 if (auto_body) {
                     const bool gather_this_pass = (iteration == 0);
                     project_body_contacts_auto(gather_this_pass);
                 } else {
                     project_body_contacts_external(desc.body_candidates, desc.body_candidate_count);
                 }
+#if defined(YSC_ENABLE_CUDA)
+                if (use_cuda_materials) {
+                    pack_positions_to_cuda_buffer();
+                    material_cuda_->upload_positions(cuda_pos_pack_.data());
+                }
+#endif
             }
         }
+#if defined(YSC_ENABLE_CUDA)
+        if (use_cuda_materials) {
+            material_cuda_->download_positions(cuda_pos_pack_.data());
+            unpack_positions_from_cuda_buffer();
+        }
+#endif
         finish_substep(config_.time_step);
     }
     require_finite_state();

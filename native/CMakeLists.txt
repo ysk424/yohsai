@@ -1,9 +1,26 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-add_library(yohsai_solver SHARED
+option(YSC_ENABLE_CUDA "Build coloured material projections with CUDA" ON)
+
+set(YSC_SOLVER_SOURCES
     src/c_api.cpp
     src/solver.cpp
 )
+
+if(YSC_ENABLE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        list(APPEND YSC_SOLVER_SOURCES src/material_cuda.cu)
+        message(STATUS "Yohsai: CUDA material projections ENABLED (${CMAKE_CUDA_COMPILER})")
+    else()
+        set(YSC_ENABLE_CUDA OFF)
+        message(WARNING "Yohsai: CUDA requested but no compiler found; building OpenMP-only")
+    endif()
+endif()
+
+add_library(yohsai_solver SHARED ${YSC_SOLVER_SOURCES})
 
 find_package(OpenMP COMPONENTS CXX)
 if(MSVC)
@@ -41,10 +58,37 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(yohsai_solver PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+if(YSC_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+    find_package(CUDAToolkit REQUIRED)
+    target_compile_definitions(yohsai_solver PRIVATE YSC_ENABLE_CUDA=1)
+    target_link_libraries(yohsai_solver PRIVATE CUDA::cudart_static)
+    set_target_properties(yohsai_solver PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RUNTIME_LIBRARY Static
+        # 5070 Ti is sm_120; keep 89 for Ada fallback machines.
+        CUDA_ARCHITECTURES "89-real;120-real;89-virtual"
+    )
+    if(MSVC)
+        target_compile_options(yohsai_solver PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3;--use_fast_math;-Xcompiler=/openmp>
+        )
+        # cudart_static may pull static CRT; keep dynamic for Blender.
+        target_link_options(yohsai_solver PRIVATE /NODEFAULTLIB:LIBCMT)
+    else()
+        target_compile_options(yohsai_solver PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3;--use_fast_math>
+        )
+    endif()
+endif()
+
 if(MSVC)
-    target_compile_options(yohsai_solver PRIVATE /W4 /permissive- /EHsc /openmp)
+    target_compile_options(yohsai_solver PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/EHsc;/openmp>
+    )
 else()
-    target_compile_options(yohsai_solver PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(yohsai_solver PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>
+    )
 endif()
 
 set_target_properties(yohsai_solver PROPERTIES

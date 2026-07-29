@@ -145,7 +145,7 @@ Self-contact is absent.
 - time step: 1/240 s;
 - substeps per click: 8;
 - gravity per click: either 0 or 9.81 m/s² in world -Z;
-- material/contact iterations: fixed at 16;
+- material/contact iterations: 16 for Normal GRAVITY, 24 (1.5x) for Zero GRAVITY;
 - seam closure: 16 mm per substep, applied once as a position change;
 - seam capture distance: 2 mm;
 - edge stretch relaxation per sweep: 1.0, with two alternating sweeps;
@@ -159,7 +159,7 @@ Self-contact is absent.
 
 Every value above is `ysc_default_config()` in `native/src/solver.cpp`, except
 the iteration count, which the Blender layer passes per click
-(`SOLVER_ITERATIONS` in `kitsuke.py`), and the candidate radius, which is
+(`SOLVER_ITERATIONS` / `ZERO_GRAVITY_SOLVER_ITERATIONS` in `kitsuke.py`), and the candidate radius, which is
 Blender-side broad phase (`COLLISION_SEARCH_M`).
 
 `Zero gravity` advances with no gravitational acceleration. `Normal gravity`

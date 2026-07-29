@@ -21,6 +21,7 @@ from .kitsuke import (
     NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
     SOLVER_ITERATIONS,
     ZERO_GRAVITY_M_PER_SECOND_SQUARED,
+    ZERO_GRAVITY_SOLVER_ITERATIONS,
     adapt_seam_counts,
     advance_kitsuke,
     clear_kitsuke_session,
@@ -459,7 +460,12 @@ class YOHSAI_OT_update_svg(Operator):
         return {"FINISHED"}
 
 
-def _run_gravity(operator: Operator, context, gravity_magnitude: float):
+def _run_gravity(
+    operator: Operator,
+    context,
+    gravity_magnitude: float,
+    solver_iterations: int = SOLVER_ITERATIONS,
+):
     props = context.scene.yohsai
     collection = props.clothes_collection
     pending_parts: tuple[Object, ...] = ()
@@ -498,7 +504,7 @@ def _run_gravity(operator: Operator, context, gravity_magnitude: float):
             collection,
             props.body_object,
             gravity_magnitude,
-            SOLVER_ITERATIONS,
+            solver_iterations,
         )
         mark_pending_parts_done(pending_parts)
     except Exception as exc:
@@ -514,7 +520,10 @@ def _run_gravity(operator: Operator, context, gravity_magnitude: float):
 class YOHSAI_OT_kitsuke_zero_gravity(Operator):
     bl_idname = "yohsai.kitsuke_zero_gravity"
     bl_label = "Zero GRAVITY"
-    bl_description = "Run automatic Sewing, then advance without gravity"
+    bl_description = (
+        "Run automatic Sewing, then advance without gravity "
+        f"({ZERO_GRAVITY_SOLVER_ITERATIONS} material iterations, 1.5x Normal)"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -522,7 +531,12 @@ class YOHSAI_OT_kitsuke_zero_gravity(Operator):
         return context.mode == "OBJECT"
 
     def execute(self, context):
-        return _run_gravity(self, context, ZERO_GRAVITY_M_PER_SECOND_SQUARED)
+        return _run_gravity(
+            self,
+            context,
+            ZERO_GRAVITY_M_PER_SECOND_SQUARED,
+            ZERO_GRAVITY_SOLVER_ITERATIONS,
+        )
 
 
 class YOHSAI_OT_kitsuke(Operator):
@@ -536,7 +550,7 @@ class YOHSAI_OT_kitsuke(Operator):
         return context.mode == "OBJECT"
 
     def execute(self, context):
-        return _run_gravity(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED)
+        return _run_gravity(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED, SOLVER_ITERATIONS)
 
 
 class YOHSAI_OT_prepare_zozo(Operator):

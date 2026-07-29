@@ -26,7 +26,12 @@ Status: current development state
 - Auto is event-driven rather than derived continuously from state. Load and
   switching Auto on lock PLACED/DONE and unlock PENDING; switching it off
   unlocks non-placed parts. GRAVITY completion never changes Lock.
-- The product path always uses the native Square-Lattice solver at 16 iterations.
+- The product path always uses the native Square-Lattice solver. Normal GRAVITY
+  uses 16 material iterations; Zero GRAVITY uses 24 (1.5x) so one press does
+  more settle work relative to fixed Blender mesh round-trip cost.
+- When built with CUDA (`YSC_ENABLE_CUDA`), coloured material projections can
+  run on the GPU (sm_89/sm_120). Auto-select uses CUDA when edge count ≥ 20k;
+  smaller meshes stay on OpenMP. Override with env `YSC_FORCE_MATERIAL=cuda|cpu`.
 - Uncaptured seams close 16 mm per substep (constant kinematic drag, no momentum).
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.

@@ -171,15 +171,19 @@ Hardware: Ryzen 9 9950X3D + RTX 5070 Ti. Cloth ~5.5k verts, ~11k edges, 120 seam
 Pillar 1 (Python BVH) is removed. Pillar 2 material GS is still ~30+ ms of the
 click; CUDA projection remains the next lever when panels grow (sleeves/collar).
 
-## Shipped in this branch (API 9)
+## Shipped in this branch (API 9 / 0.9.3-rtx)
 
 - `native/src/body_bvh.hpp` — host AABB BVH over body triangles
 - `YSC_BODY_CANDIDATES_AUTO` advance mode; Kitsuke no longer builds Blender BVH
 - OpenMP parallel team kept across colour classes; fused auto contact project
-- Deploy: `bin/yohsai_solver_v9b.dll` (or rebuild `yohsai_solver.dll`)
+- **`material_cuda.cu`** — coloured seams/edges/quads/bends on CUDA (sm_89 + sm_120);
+  host still does integrate / seam attract / capture / Body contact; falls back to
+  OpenMP if no device
+- Zero GRAVITY uses 24 material iterations (1.5× Normal’s 16)
+- Product DLL: `bin/yohsai_solver.dll` (CUDA static runtime linked)
 
 ## Immediate next actions
 
-1. CUDA colour projection for edges/quads/bends (sm_120) — residual pillar 2
-2. Faster body BVH build / optional low-poly collision proxy for first click
+1. Keep materials on device across contact (cut H2D/D2H per iteration)
+2. Optional low-poly collision proxy for first-click BVH build
 3. Optional OptiX closest-hit when cloth counts grow past ~20k verts

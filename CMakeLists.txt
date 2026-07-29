@@ -2,6 +2,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-project(yohsai_solver VERSION 0.9.2 LANGUAGES CXX)
+# CUDA is enabled inside native/ when YSC_ENABLE_CUDA and a compiler exist.
+project(yohsai_solver VERSION 0.9.3 LANGUAGES CXX)
 
 add_subdirectory(native)
