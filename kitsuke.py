@@ -62,7 +62,9 @@ class _PartRange:
 class _BodySnapshot:
     vertices: np.ndarray
     faces: np.ndarray
-    bvh: BVHTree
+    # Optional Blender BVH kept only for legacy Python candidate paths.
+    # The product advance path uses the native solver BVH (API v9 auto mode).
+    bvh: BVHTree | None
     ray_distance: float
     bounds_minimum: np.ndarray
     bounds_maximum: np.ndarray
@@ -412,16 +414,13 @@ def _body_snapshot(context, body: bpy.types.Object) -> _BodySnapshot:
         evaluated.to_mesh_clear()
     if not len(vertices) or not len(faces):
         raise KitsukeError("Body has no triangles for collision detection.")
-    bvh = BVHTree.FromPolygons(
-        [Vector(tuple(float(value) for value in vertex)) for vertex in vertices],
-        [tuple(int(value) for value in face) for face in faces],
-        all_triangles=True,
-    )
+    # Skip Blender BVH construction (very expensive on high-poly Body meshes).
+    # Contact candidates are gathered inside the native solver (OpenMP BVH).
     diagonal = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
     return _BodySnapshot(
         vertices,
         faces,
-        bvh,
+        None,
         max(diagonal * 2.0, 1.0),
         vertices.min(axis=0),
         vertices.max(axis=0),
@@ -632,9 +631,9 @@ class _KitsukeSession:
         previous_positions = self.positions.copy()
         previous_velocities = self.velocities.copy()
         previous_seams = self.runtime.seam_state()
-        body_candidates = _unlocked_body_collision_candidates(self.positions, self.body, self.locked)
         try:
-            self.runtime.advance(body_candidates, gravity_magnitude, solver_iterations)
+            # Body candidates: native auto BVH (no Python per-vertex loop).
+            self.runtime.advance(None, gravity_magnitude, solver_iterations)
         except NativeSolverError as exc:
             self.runtime.replace_state(previous_positions, previous_velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)

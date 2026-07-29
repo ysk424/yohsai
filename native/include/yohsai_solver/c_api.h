@@ -17,7 +17,11 @@
 extern "C" {
 #endif
 
-#define YSC_API_VERSION 8
+#define YSC_API_VERSION 9
+
+/* Pass as body_candidate_count to let the solver gather Body contacts itself
+   with an internal BVH (OpenMP). body_candidates is ignored. */
+#define YSC_BODY_CANDIDATES_AUTO (-1)
 
 typedef void* ysc_handle;
 
@@ -87,6 +91,7 @@ typedef struct ysc_create_desc {
 typedef struct ysc_advance_desc {
     float gravity[3];
     int32_t iterations;
+    /* Number of (cloth_vertex, body_face) pairs, or YSC_BODY_CANDIDATES_AUTO. */
     int32_t body_candidate_count;
     const int32_t* body_candidates;
 } ysc_advance_desc;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "body_bvh.hpp"
 #include "math.hpp"
 #include "yohsai_solver/c_api.h"
 
@@ -79,6 +80,10 @@ private:
     std::vector<Bend> bends_;
     std::vector<Vec3> body_positions_;
     std::vector<Face> body_faces_;
+    BodyBvh body_bvh_;
+    // Per-vertex nearest body face for the current contact pass (-1 = none).
+    std::vector<int32_t> contact_face_;
+    int32_t last_auto_candidate_count_ = 0;
     std::vector<Vec3> contact_corrections_;
     std::vector<int32_t> contact_correction_counts_;
     std::vector<int32_t> seam_driven_;
@@ -87,9 +92,22 @@ private:
     ColorGroups edge_colors_;
     ColorGroups quad_colors_;
     ColorGroups bend_colors_;
+    // Flattened colour tables for tighter OpenMP loops.
+    std::vector<int32_t> edge_colour_offsets_;
+    std::vector<int32_t> edge_colour_indices_;
+    std::vector<int32_t> quad_colour_offsets_;
+    std::vector<int32_t> quad_colour_indices_;
+    std::vector<int32_t> bend_colour_offsets_;
+    std::vector<int32_t> bend_colour_indices_;
+    std::vector<int32_t> seam_colour_offsets_;
+    std::vector<int32_t> seam_colour_indices_;
 
     void validate_config() const;
     void build_color_groups();
+    static void flatten_colors(
+        const ColorGroups& groups,
+        std::vector<int32_t>& offsets,
+        std::vector<int32_t>& indices);
     void project_seam_attraction();
     void integrate(const Vec3& gravity, float time_step);
     void update_seam_capture();
@@ -101,7 +119,9 @@ private:
     void project_bend(const Bend& bend);
     void project_bends(bool reverse);
     void project_distance(int32_t a, int32_t b, float target_length, float relaxation);
-    void project_body_contacts(const int32_t* candidates, int32_t count);
+    void project_body_contacts_external(const int32_t* candidates, int32_t count);
+    // gather=true rebuilds nearest body faces; false reuses contact_face_.
+    void project_body_contacts_auto(bool gather);
     void finish_substep(float time_step);
     [[nodiscard]] Vec3 closest_triangle_point(
         const Vec3& point,
@@ -110,6 +130,7 @@ private:
         const Vec3& c) const;
     void clear_contact_corrections();
     void require_finite_state() const;
+    [[nodiscard]] int32_t gather_body_contacts_auto();
 };
 
 ysc_config default_config();

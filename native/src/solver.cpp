@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -229,9 +230,25 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
 
     contact_corrections_.resize(vertices_.size());
     contact_correction_counts_.resize(vertices_.size());
+    contact_face_.resize(vertices_.size(), -1);
     seam_driven_.resize(vertices_.size());
+    body_bvh_.build(body_positions_, body_faces_);
     build_color_groups();
     require_finite_state();
+}
+
+void Solver::flatten_colors(
+    const ColorGroups& groups,
+    std::vector<int32_t>& offsets,
+    std::vector<int32_t>& indices) {
+    offsets.clear();
+    indices.clear();
+    offsets.reserve(groups.size() + 1);
+    offsets.push_back(0);
+    for (const std::vector<int32_t>& group : groups) {
+        indices.insert(indices.end(), group.begin(), group.end());
+        offsets.push_back(static_cast<int32_t>(indices.size()));
+    }
 }
 
 void Solver::build_color_groups() {
@@ -266,6 +283,10 @@ void Solver::build_color_groups() {
                 emit(vertex);
             }
         });
+    flatten_colors(seam_colors_, seam_colour_offsets_, seam_colour_indices_);
+    flatten_colors(edge_colors_, edge_colour_offsets_, edge_colour_indices_);
+    flatten_colors(quad_colors_, quad_colour_offsets_, quad_colour_indices_);
+    flatten_colors(bend_colors_, bend_colour_offsets_, bend_colour_indices_);
 }
 
 int32_t Solver::vertex_count() const noexcept {
@@ -454,16 +475,31 @@ void Solver::project_distance(
 }
 
 void Solver::project_seams() {
-    for (const std::vector<int32_t>& group : seam_colors_) {
-        const int32_t count = static_cast<int32_t>(group.size());
+    const int32_t colour_count = static_cast<int32_t>(seam_colour_offsets_.size()) - 1;
+    if (colour_count <= 0) {
+        return;
+    }
 #if defined(_OPENMP)
-#  pragma omp parallel for schedule(static) if (count > 8)
+#  pragma omp parallel
 #endif
-        for (int32_t local = 0; local < count; ++local) {
-            const Seam& seam = seams_[static_cast<size_t>(group[static_cast<size_t>(local)])];
-            if (seam.captured) {
-                project_distance(seam.a, seam.b, seam.target_length, 1.0F);
+    {
+        for (int32_t colour = 0; colour < colour_count; ++colour) {
+            const int32_t begin = seam_colour_offsets_[static_cast<size_t>(colour)];
+            const int32_t end = seam_colour_offsets_[static_cast<size_t>(colour + 1)];
+            const int32_t count = end - begin;
+#if defined(_OPENMP)
+#  pragma omp for schedule(static) nowait
+#endif
+            for (int32_t local = 0; local < count; ++local) {
+                const Seam& seam =
+                    seams_[static_cast<size_t>(seam_colour_indices_[static_cast<size_t>(begin + local)])];
+                if (seam.captured) {
+                    project_distance(seam.a, seam.b, seam.target_length, 1.0F);
+                }
             }
+#if defined(_OPENMP)
+#  pragma omp barrier
+#endif
         }
     }
 }
@@ -511,17 +547,28 @@ void Solver::project_edge(const Edge& edge) {
 }
 
 void Solver::project_edges(bool reverse) {
-    const int32_t colour_count = static_cast<int32_t>(edge_colors_.size());
-    for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
-        const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
-        const std::vector<int32_t>& group = edge_colors_[static_cast<size_t>(colour)];
-        const int32_t count = static_cast<int32_t>(group.size());
+    const int32_t colour_count = static_cast<int32_t>(edge_colour_offsets_.size()) - 1;
+    if (colour_count <= 0) {
+        return;
+    }
+    // Keep one OpenMP team across colours to avoid repeated fork/join on MSVC.
 #if defined(_OPENMP)
-#  pragma omp parallel for schedule(static) if (count > 16)
+#  pragma omp parallel
 #endif
-        for (int32_t local = 0; local < count; ++local) {
-            const int32_t index = reverse ? (count - 1 - local) : local;
-            project_edge(edges_[static_cast<size_t>(group[static_cast<size_t>(index)])]);
+    {
+        for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
+            const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
+            const int32_t begin = edge_colour_offsets_[static_cast<size_t>(colour)];
+            const int32_t end = edge_colour_offsets_[static_cast<size_t>(colour + 1)];
+            const int32_t count = end - begin;
+#if defined(_OPENMP)
+#  pragma omp for schedule(static)
+#endif
+            for (int32_t local = 0; local < count; ++local) {
+                const int32_t index = reverse ? (count - 1 - local) : local;
+                project_edge(edges_[static_cast<size_t>(
+                    edge_colour_indices_[static_cast<size_t>(begin + index)])]);
+            }
         }
     }
 }
@@ -567,17 +614,27 @@ void Solver::project_quad(const Quad& quad) {
 }
 
 void Solver::project_quad_shear(bool reverse) {
-    const int32_t colour_count = static_cast<int32_t>(quad_colors_.size());
-    for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
-        const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
-        const std::vector<int32_t>& group = quad_colors_[static_cast<size_t>(colour)];
-        const int32_t count = static_cast<int32_t>(group.size());
+    const int32_t colour_count = static_cast<int32_t>(quad_colour_offsets_.size()) - 1;
+    if (colour_count <= 0) {
+        return;
+    }
 #if defined(_OPENMP)
-#  pragma omp parallel for schedule(static) if (count > 8)
+#  pragma omp parallel
 #endif
-        for (int32_t local = 0; local < count; ++local) {
-            const int32_t index = reverse ? (count - 1 - local) : local;
-            project_quad(quads_[static_cast<size_t>(group[static_cast<size_t>(index)])]);
+    {
+        for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
+            const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
+            const int32_t begin = quad_colour_offsets_[static_cast<size_t>(colour)];
+            const int32_t end = quad_colour_offsets_[static_cast<size_t>(colour + 1)];
+            const int32_t count = end - begin;
+#if defined(_OPENMP)
+#  pragma omp for schedule(static)
+#endif
+            for (int32_t local = 0; local < count; ++local) {
+                const int32_t index = reverse ? (count - 1 - local) : local;
+                project_quad(quads_[static_cast<size_t>(
+                    quad_colour_indices_[static_cast<size_t>(begin + index)])]);
+            }
         }
     }
 }
@@ -621,17 +678,27 @@ void Solver::project_bend(const Bend& bend) {
 }
 
 void Solver::project_bends(bool reverse) {
-    const int32_t colour_count = static_cast<int32_t>(bend_colors_.size());
-    for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
-        const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
-        const std::vector<int32_t>& group = bend_colors_[static_cast<size_t>(colour)];
-        const int32_t count = static_cast<int32_t>(group.size());
+    const int32_t colour_count = static_cast<int32_t>(bend_colour_offsets_.size()) - 1;
+    if (colour_count <= 0) {
+        return;
+    }
 #if defined(_OPENMP)
-#  pragma omp parallel for schedule(static) if (count > 8)
+#  pragma omp parallel
 #endif
-        for (int32_t local = 0; local < count; ++local) {
-            const int32_t index = reverse ? (count - 1 - local) : local;
-            project_bend(bends_[static_cast<size_t>(group[static_cast<size_t>(index)])]);
+    {
+        for (int32_t colour_offset = 0; colour_offset < colour_count; ++colour_offset) {
+            const int32_t colour = reverse ? (colour_count - 1 - colour_offset) : colour_offset;
+            const int32_t begin = bend_colour_offsets_[static_cast<size_t>(colour)];
+            const int32_t end = bend_colour_offsets_[static_cast<size_t>(colour + 1)];
+            const int32_t count = end - begin;
+#if defined(_OPENMP)
+#  pragma omp for schedule(static)
+#endif
+            for (int32_t local = 0; local < count; ++local) {
+                const int32_t index = reverse ? (count - 1 - local) : local;
+                project_bend(bends_[static_cast<size_t>(
+                    bend_colour_indices_[static_cast<size_t>(begin + index)])]);
+            }
         }
     }
 }
@@ -682,11 +749,9 @@ void Solver::clear_contact_corrections() {
     std::fill(contact_correction_counts_.begin(), contact_correction_counts_.end(), 0);
 }
 
-void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
-    // Clear first: the counts double as this substep's contact flags, so stale
-    // ones would keep damping a vertex that has already left the Body.
-    // Candidate accumulation is left serial: candidates can share a cloth
-    // vertex, so parallel writes would need atomics on Vec3 accumulators.
+void Solver::project_body_contacts_external(const int32_t* candidates, int32_t count) {
+    // External candidates may list the same cloth vertex more than once; keep
+    // accumulation serial for that path. Auto contacts use the parallel path.
     clear_contact_corrections();
     if (count <= 0) {
         return;
@@ -727,6 +792,100 @@ void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
             static_cast<float>(contact_correction_counts_[static_cast<size_t>(index)]);
         correction = clamp_length(correction, config_.maximum_position_correction * 0.04F);
         vertices_[static_cast<size_t>(index)].position += correction;
+    }
+}
+
+int32_t Solver::gather_body_contacts_auto() {
+    // One nearest body face per cloth vertex. Matches the former Python
+    // broadphase (AABB pad + radius query, unlimited nearest when inside AABB).
+    constexpr float kCollisionSearchM = 0.04F;
+    const float search = std::max(config_.contact_thickness, kCollisionSearchM);
+    const float pad = search + 1.0e-6F;
+    const int32_t vertex_count = static_cast<int32_t>(vertices_.size());
+    int32_t candidate_count = 0;
+    if (body_bvh_.empty()) {
+        std::fill(contact_face_.begin(), contact_face_.end(), -1);
+        return 0;
+    }
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static) reduction(+ : candidate_count)
+#endif
+    for (int32_t index = 0; index < vertex_count; ++index) {
+        contact_face_[static_cast<size_t>(index)] = -1;
+        const Vertex& vertex = vertices_[static_cast<size_t>(index)];
+        if (vertex.locked || vertex.inverse_mass <= 0.0F) {
+            continue;
+        }
+        if (!body_bvh_.contains_expanded(vertex.position, pad)) {
+            continue;
+        }
+        int32_t face_index = -1;
+        float distance = 0.0F;
+        bool found = body_bvh_.nearest_face(vertex.position, search, &face_index, &distance);
+        if (!found) {
+            // Penetrating or deep vertices: unlimited nearest if still in AABB.
+            found = body_bvh_.nearest_face(
+                vertex.position,
+                std::numeric_limits<float>::infinity(),
+                &face_index,
+                &distance);
+            if (!found) {
+                continue;
+            }
+            const Face& face = body_faces_[static_cast<size_t>(face_index)];
+            const Vec3& a = body_positions_[static_cast<size_t>(face[0])];
+            const Vec3& b = body_positions_[static_cast<size_t>(face[1])];
+            const Vec3& c = body_positions_[static_cast<size_t>(face[2])];
+            const Vec3 normal = normalized(cross(b - a, c - a));
+            const Vec3 closest = closest_triangle_point(vertex.position, a, b, c);
+            const float signed_distance = dot(vertex.position - closest, normal);
+            if (signed_distance >= config_.contact_thickness && distance > search) {
+                continue;
+            }
+        }
+        contact_face_[static_cast<size_t>(index)] = face_index;
+        ++candidate_count;
+    }
+    return candidate_count;
+}
+
+void Solver::project_body_contacts_auto(bool gather) {
+    // Each unlocked vertex owns at most one face, so the correction write is
+    // race-free under OpenMP. Gathering every contact pass is too expensive on
+    // high-poly bodies; the advance loop gathers once per substep.
+    clear_contact_corrections();
+    if (gather) {
+        last_auto_candidate_count_ = gather_body_contacts_auto();
+    }
+    if (last_auto_candidate_count_ <= 0) {
+        return;
+    }
+    const int32_t vertex_count = static_cast<int32_t>(vertices_.size());
+#if defined(_OPENMP)
+#  pragma omp parallel for schedule(static)
+#endif
+    for (int32_t index = 0; index < vertex_count; ++index) {
+        const int32_t face_index = contact_face_[static_cast<size_t>(index)];
+        if (face_index < 0) {
+            continue;
+        }
+        Vertex& vertex = vertices_[static_cast<size_t>(index)];
+        if (vertex.locked) {
+            continue;
+        }
+        const Face& face = body_faces_[static_cast<size_t>(face_index)];
+        const Vec3& a = body_positions_[static_cast<size_t>(face[0])];
+        const Vec3& b = body_positions_[static_cast<size_t>(face[1])];
+        const Vec3& c = body_positions_[static_cast<size_t>(face[2])];
+        const Vec3 normal = normalized(cross(b - a, c - a));
+        const Vec3 closest = closest_triangle_point(vertex.position, a, b, c);
+        const float signed_distance = dot(vertex.position - closest, normal);
+        if (signed_distance < config_.contact_thickness) {
+            Vec3 correction = normal * (config_.contact_thickness - signed_distance);
+            correction = clamp_length(correction, config_.maximum_position_correction * 0.04F);
+            vertex.position += correction;
+            contact_correction_counts_[static_cast<size_t>(index)] = 1;
+        }
     }
 }
 
@@ -773,18 +932,24 @@ void Solver::require_finite_state() const {
 ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     if (
         !std::isfinite(desc.gravity[0]) || !std::isfinite(desc.gravity[1]) ||
-        !std::isfinite(desc.gravity[2]) || desc.body_candidate_count < 0) {
+        !std::isfinite(desc.gravity[2])) {
         throw std::invalid_argument("advance descriptor contains an invalid value");
     }
-    if (desc.body_candidate_count > 0 && desc.body_candidates == nullptr) {
+    const bool auto_body = desc.body_candidate_count == YSC_BODY_CANDIDATES_AUTO;
+    if (!auto_body && desc.body_candidate_count < 0) {
+        throw std::invalid_argument("advance descriptor contains an invalid value");
+    }
+    if (!auto_body && desc.body_candidate_count > 0 && desc.body_candidates == nullptr) {
         throw std::invalid_argument("advance descriptor has no Body candidates");
     }
-    for (int32_t index = 0; index < desc.body_candidate_count; ++index) {
-        validate_index(desc.body_candidates[index * 2], vertex_count(), "Body candidate vertex");
-        validate_index(
-            desc.body_candidates[index * 2 + 1],
-            static_cast<int32_t>(body_faces_.size()),
-            "Body candidate face");
+    if (!auto_body) {
+        for (int32_t index = 0; index < desc.body_candidate_count; ++index) {
+            validate_index(desc.body_candidates[index * 2], vertex_count(), "Body candidate vertex");
+            validate_index(
+                desc.body_candidates[index * 2 + 1],
+                static_cast<int32_t>(body_faces_.size()),
+                "Body candidate face");
+        }
     }
 
     const int32_t iterations = desc.iterations > 0 ? desc.iterations : config_.iterations;
@@ -795,6 +960,8 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
         click_start.push_back(vertex.position);
     }
 
+    last_auto_candidate_count_ = 0;
+    const int32_t external_candidates = auto_body ? 0 : desc.body_candidate_count;
     for (int32_t substep = 0; substep < config_.substeps; ++substep) {
         // Ahead of the prediction, so integrate() rebases `previous` onto the
         // dragged position and the pull itself contributes no velocity.  Once
@@ -818,11 +985,16 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             // cost of four pure-serial Gauss-Seidel hops.
             project_edges(reverse);
             project_edges(!reverse);
-            // Contact every other iteration (and always the last) halves the
-            // serial candidate walk while still peeling deep penetrations over
-            // the click; finish_substep reads the latest contact flags.
+            // Contact every other iteration (and always the last). Auto mode
+            // gathers nearest body faces once per substep on the first contact
+            // pass, then reuses those pairs for later contact passes.
             if ((iteration & 1) == 0 || iteration + 1 == iterations) {
-                project_body_contacts(desc.body_candidates, desc.body_candidate_count);
+                if (auto_body) {
+                    const bool gather_this_pass = (iteration == 0);
+                    project_body_contacts_auto(gather_this_pass);
+                } else {
+                    project_body_contacts_external(desc.body_candidates, desc.body_candidate_count);
+                }
             }
         }
         finish_substep(config_.time_step);
@@ -838,7 +1010,7 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     stats.edge_count = static_cast<int32_t>(edges_.size());
     stats.quad_count = static_cast<int32_t>(quads_.size());
     stats.bend_count = static_cast<int32_t>(bends_.size());
-    stats.body_candidate_count = desc.body_candidate_count;
+    stats.body_candidate_count = auto_body ? last_auto_candidate_count_ : external_candidates;
     for (size_t index = 0; index < vertices_.size(); ++index) {
         stats.maximum_displacement = std::max(
             stats.maximum_displacement,

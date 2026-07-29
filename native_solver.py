@@ -11,7 +11,9 @@ from pathlib import Path
 import numpy as np
 
 
-API_VERSION = 8
+API_VERSION = 9
+# Match YSC_BODY_CANDIDATES_AUTO in c_api.h: native BVH gathers contacts.
+BODY_CANDIDATES_AUTO = -1
 _ERROR_CAPACITY = 1024
 
 
@@ -197,6 +199,12 @@ def _configure_library(library: ctypes.CDLL) -> None:
 _library: ctypes.CDLL | None = None
 
 
+def reload_library() -> None:
+    """Drop the cached CDLL so the next call reloads from disk (new DLL name)."""
+    global _library
+    _library = None
+
+
 def _load_library() -> ctypes.CDLL:
     attempted: list[str] = []
     for path in _library_candidates():
@@ -361,14 +369,24 @@ class NativeSolverRuntime:
         body_candidates,
         gravity_magnitude: float,
         solver_iterations: int,
+        *,
+        auto_body_candidates: bool = True,
     ) -> None:
-        body = _int_array(body_candidates, 2, "Body candidates")
-        desc = _AdvanceDesc(
-            (ctypes.c_float * 3)(0.0, 0.0, -float(gravity_magnitude)),
-            int(solver_iterations),
-            len(body),
-            _int_pointer(body),
-        )
+        if auto_body_candidates or body_candidates is None:
+            desc = _AdvanceDesc(
+                (ctypes.c_float * 3)(0.0, 0.0, -float(gravity_magnitude)),
+                int(solver_iterations),
+                BODY_CANDIDATES_AUTO,
+                None,
+            )
+        else:
+            body = _int_array(body_candidates, 2, "Body candidates")
+            desc = _AdvanceDesc(
+                (ctypes.c_float * 3)(0.0, 0.0, -float(gravity_magnitude)),
+                int(solver_iterations),
+                len(body),
+                _int_pointer(body),
+            )
         stats = _Stats()
         self._call("ysc_advance", self._handle, ctypes.byref(desc), ctypes.byref(stats))
         self.last_stats = {name: getattr(stats, name) for name, _ctype in stats._fields_}

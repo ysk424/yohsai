@@ -2,6 +2,6 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-project(yohsai_solver VERSION 0.9.1 LANGUAGES CXX)
+project(yohsai_solver VERSION 0.9.2 LANGUAGES CXX)
 
 add_subdirectory(native)

@@ -55,18 +55,24 @@ The extension and native project versions are defined in
 .\build_native.ps1 -Configuration Release
 ```
 
-### OpenMP colouring (0.8.2+)
+### OpenMP colouring (0.8.2+) and RTX auto-contact (0.9.2 / API 9)
 
 The native square-lattice solver parallelises material projections with OpenMP.
 
 - At create time the solver greedily colours seams, edges, quads, and bends so
   that constraints of one colour never share a vertex.
-- Each colour is projected with `#pragma omp parallel for`; colours stay
-  sequential (Gauss-Seidel across colours, independent within a colour).
-- Body-candidate accumulation stays serial (candidates can share a cloth
-  vertex). Integrate, finish, and contact apply are vertex-parallel.
+- Each colour is projected with OpenMP; one parallel team is kept across
+  colours in a family to avoid repeated MSVC fork/join.
+- Colours stay sequential (Gauss-Seidel across colours, independent within a
+  colour). Integrate, finish, and auto contact apply are vertex-parallel.
 - Thread count is the usual OpenMP control: `OMP_NUM_THREADS` (and the MSVC
   runtime `vcomp140.dll` already shipped under `bin/`).
+
+**API 9 / `YSC_BODY_CANDIDATES_AUTO`:** Body nearest-face queries run inside
+the DLL on a host AABB BVH built at create time. The Python
+`bvh.find_nearest` loop and Blender `BVHTree` construction are no longer on
+the product click path. Kitsuke passes `body_candidates=None` so the solver
+gathers once per substep and reuses faces for later contact passes.
 
 Colouring changes the pure serial Gauss-Seidel update order: neighbouring
 constraints only see updates from earlier colours. Settled poses can differ
