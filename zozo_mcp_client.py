@@ -68,7 +68,7 @@ class MCPClient:
                 "params": {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "yohsai", "version": "0.9.4"},
+                    "clientInfo": {"name": "yohsai", "version": "0.10.2"},
                 },
             },
             timeout=5.0,
@@ -128,13 +128,91 @@ def _group_uuid(payload: dict) -> str:
     return str(uuid)
 
 
-def _delete_owned_groups(client: MCPClient, owned_names: set[str]) -> None:
-    groups = client.call_tool("get_active_groups").get("groups", [])
+def _list_groups(client: MCPClient) -> list[dict]:
+    payload = client.call_tool("get_active_groups")
+    groups = payload.get("groups") or []
+    return [group for group in groups if isinstance(group, dict)]
+
+
+def _clear_group_objects(client: MCPClient, group_uuid: str, assigned: list | None) -> None:
+    """Empty a dynamics group without using the broken delete_group operator path."""
+    try:
+        client.call_tool("remove_all_objects_from_group", {"group_uuid": group_uuid})
+        return
+    except Exception:
+        pass
+    for item in assigned or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not name:
+            continue
+        try:
+            client.call_tool(
+                "remove_object_from_group",
+                {"group_uuid": group_uuid, "object_name": str(name)},
+            )
+        except Exception:
+            continue
+
+
+def _find_group_by_name(groups: list[dict], name: str) -> dict | None:
     for group in groups:
-        name = group.get("name")
-        uuid = group.get("uuid")
-        if name in owned_names and uuid:
-            client.call_tool("delete_group", {"group_uuid": uuid})
+        if group.get("name") == name and group.get("uuid"):
+            return group
+    return None
+
+
+def _ensure_group(client: MCPClient, *, name: str, group_type: str) -> str:
+    """Create or reuse a named SHELL/STATIC group.
+
+    ZOZO MCP ``delete_group`` currently calls
+    ``bpy.ops.object.delete_group(group_uuid=...)``, but the operator only
+    accepts ``group_index``. That aborts Prepare after the first successful
+    run (when Yohsai-owned groups already exist) and leaves Dynamics empty.
+    Reuse + clear avoids that broken delete path entirely.
+    """
+    existing = _find_group_by_name(_list_groups(client), name)
+    if existing is not None:
+        group_uuid = str(existing["uuid"])
+        _clear_group_objects(client, group_uuid, existing.get("assigned_objects"))
+        if existing.get("object_type") != group_type:
+            client.call_tool(
+                "set_group_type",
+                {"group_uuid": group_uuid, "type": group_type},
+            )
+        return group_uuid
+
+    created = client.call_tool("create_group", {"name": name, "type": group_type})
+    created_uuid = _group_uuid(created)
+
+    # create_group historically returns the last active slot, which can be a
+    # pre-existing group when lower slots are free. Prefer the named match.
+    matched = _find_group_by_name(_list_groups(client), name)
+    if matched is not None:
+        group_uuid = str(matched["uuid"])
+        if matched.get("object_type") != group_type:
+            client.call_tool(
+                "set_group_type",
+                {"group_uuid": group_uuid, "type": group_type},
+            )
+        return group_uuid
+    return created_uuid
+
+
+def _member_names(membership: dict) -> set[str]:
+    names = {
+        item.get("name")
+        for item in (membership.get("objects") or membership.get("assigned_objects") or [])
+        if isinstance(item, dict)
+    }
+    if not names and isinstance(membership.get("group"), dict):
+        names = {
+            item.get("name")
+            for item in (membership["group"].get("assigned_objects") or [])
+            if isinstance(item, dict)
+        }
+    return {str(name) for name in names if name}
 
 
 def _assign_object(
@@ -155,31 +233,40 @@ def _assign_object(
         for item in (result.get("added_objects") or [])
         if isinstance(item, dict)
     }
-    if object_name not in added:
-        detail = "; ".join(str(w) for w in warnings) if warnings else "object was not added"
-        raise RuntimeError(
-            f"Failed to assign {role} object '{object_name}' to ZOZO group {group_uuid}: {detail}"
-        )
-    if warnings:
-        # Soft warnings after a successful add (e.g. name renames) stay informative only.
-        pass
-
     membership = client.call_tool("get_group_objects", {"group_uuid": group_uuid})
-    member_names = {
+    members = _member_names(membership)
+    # MCP may report added_objects even when the Blender operator skipped the
+    # mesh (linked-duplicate / duplicate-face guards). Always require the
+    # post-assign membership list to contain the object.
+    if object_name not in members:
+        detail = "; ".join(str(w) for w in warnings) if warnings else "object was not added"
+        if object_name not in added:
+            detail = f"{detail}; add_objects_to_group did not list it"
+        raise RuntimeError(
+            f"Failed to assign {role} object '{object_name}' to ZOZO group "
+            f"{group_uuid}: {detail}"
+        )
+
+
+def _assert_simulatable(client: MCPClient, *, cloth_uuid: str, cloth_object: str) -> None:
+    """Fail closed if ZOZO would still show 'No dynamics to simulate'."""
+    groups = _list_groups(client)
+    cloth = next((group for group in groups if group.get("uuid") == cloth_uuid), None)
+    if cloth is None:
+        raise RuntimeError(f"Cloth group {cloth_uuid} missing after ZOZO MCP setup.")
+    if cloth.get("object_type") != "SHELL":
+        raise RuntimeError(
+            f"Cloth group is {cloth.get('object_type')!r}, expected SHELL."
+        )
+    assigned = {
         item.get("name")
-        for item in (membership.get("objects") or membership.get("assigned_objects") or [])
+        for item in (cloth.get("assigned_objects") or [])
         if isinstance(item, dict)
     }
-    # Some handler versions only return the serialized group.
-    if not member_names and isinstance(membership.get("group"), dict):
-        member_names = {
-            item.get("name")
-            for item in (membership["group"].get("assigned_objects") or [])
-            if isinstance(item, dict)
-        }
-    if member_names and object_name not in member_names:
+    if cloth_object not in assigned:
         raise RuntimeError(
-            f"ZOZO group {group_uuid} does not list {role} object '{object_name}' after assignment."
+            f"Cloth object '{cloth_object}' is not assigned to the SHELL group; "
+            "ZOZO would report no dynamics to simulate."
         )
 
 
@@ -249,12 +336,7 @@ def _configure(config: dict) -> dict:
         cloth_object = str(config["cloth_object"])
         body_object = str(config["body_object"])
 
-        _delete_owned_groups(client, {cloth_group, body_group})
-
-        cloth = client.call_tool(
-            "create_group", {"name": cloth_group, "type": "SHELL"}
-        )
-        cloth_uuid = _group_uuid(cloth)
+        cloth_uuid = _ensure_group(client, name=cloth_group, group_type="SHELL")
         _assign_object(
             client,
             group_uuid=cloth_uuid,
@@ -266,10 +348,7 @@ def _configure(config: dict) -> dict:
             {"group_uuid": cloth_uuid, "properties": config["cloth_properties"]},
         )
 
-        body = client.call_tool(
-            "create_group", {"name": body_group, "type": "STATIC"}
-        )
-        body_uuid = _group_uuid(body)
+        body_uuid = _ensure_group(client, name=body_group, group_type="STATIC")
         _assign_object(
             client,
             group_uuid=body_uuid,
@@ -287,6 +366,9 @@ def _configure(config: dict) -> dict:
             body_uuid=body_uuid,
             body_object=body_object,
             timeout_seconds=float(config.get("capture_timeout_seconds", 300.0)),
+        )
+        _assert_simulatable(
+            client, cloth_uuid=cloth_uuid, cloth_object=cloth_object
         )
 
         return {
