@@ -113,13 +113,19 @@ smoothing its neighbourhood:
    around each hit, not just the hit.
 3. Strongly Laplacian-smooth that region (0.6 toward the neighbour average, four
    sub-iterations) to flatten the crumple.
-4. Repeat until no intersection remains (capped at 40 passes).
+4. Repeat until no intersection remains (capped at 48 passes).  Body clamp runs
+   **inside** each pass.  When residual vertex counts stall, the neighbourhood
+   widens, smoothing strengthens, and a half-clearance push along the body
+   normal breaks the plateau.
+5. If residual vertices remain, Prepare keeps the best-effort cloth/body copies
+   for inspection, reports `self-intersect: N verts remain after P/M passes`,
+   and refuses ZOZO MCP setup.  The count is involved vertices, not pair count.
 
 The folds sit outside the body, so flattening them does not drive cloth inward;
-as a fallback any vertex still inside the body afterwards is clamped back onto
-its surface plus the body clearance.  ppf then re-sews the loose stitches and
-re-drapes the smoothed region with contact, which re-forms the gathers without
-re-creating the self-intersection.
+any vertex still inside the body is clamped back onto its surface plus the body
+clearance.  ppf then re-sews the loose stitches and re-drapes the smoothed
+region with contact, which re-forms the gathers without re-creating the
+self-intersection.
 
 The resolved mesh is handed off **already triangulated**.  The cloth still
 carries grain quads, and ppf triangulates any quad with its own diagonal, which
