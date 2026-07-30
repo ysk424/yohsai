@@ -635,7 +635,8 @@ class YOHSAI_OT_prepare_zozo(Operator):
         summary = (
             f"Prepared {prepared.seam_count} ZOZO stitches "
             f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm); "
-            f"{prepared.self_intersection.summary()}"
+            f"{prepared.self_intersection.summary()}; "
+            f"{prepared.shell_isect.summary()}"
         )
         try:
             config_path = Path(_parser_data_dir()) / _ZOZO_CONFIG_FILENAME

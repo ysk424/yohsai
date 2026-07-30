@@ -13,6 +13,7 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from .kitsuke import KitsukeError, completed_kitsuke_handoff
+from .shell_isect_bridge import ShellIsectReport, run_check_and_fix
 
 
 ZOZO_MCP_PORT = 9633
@@ -80,6 +81,7 @@ class ZozoPreparation:
     body_group_name: str
     project_name: str
     self_intersection: SelfIntersectionResult
+    shell_isect: ShellIsectReport
 
     def mcp_configuration(self, scene: bpy.types.Scene) -> dict:
         fps = max(1, int(round(float(scene.render.fps) / float(scene.render.fps_base))))
@@ -695,13 +697,25 @@ def prepare_for_zozo(
     cloth["yohsai_zozo_group"] = cloth_group_name
     body_copy["yohsai_zozo_group"] = body_group_name
 
+    # shell-isect 0.10.x: check + local-fix stub (see shell-isect PROCEDURE.md).
+    shell_report = run_check_and_fix(cloth)
+    cloth["yohsai_shell_isect"] = shell_report.summary()
+
     if not intersection.resolved:
         # Keep the best-effort copies for inspection, but refuse MCP setup:
         # handing a known-self-intersecting shell to Transfer only wastes a run.
         raise ZozoHandoffError(
-            f"{intersection.summary()}. "
+            f"{intersection.summary()}; {shell_report.summary()}. "
             f"Kept '{cloth.name}' / '{body_copy.name}' for inspection; "
             "reduce residual gathers (Zero GRAVITY / re-place) and Prepare again."
+        )
+
+    if shell_report.available and shell_report.pairs_after > 0:
+        raise ZozoHandoffError(
+            f"{intersection.summary()}; {shell_report.summary()}. "
+            f"local-fix is {shell_report.fix_status} (0.10 stub does not move verts). "
+            f"Kept '{cloth.name}' / '{body_copy.name}' for inspection; "
+            "upgrade shell-isect local-fix with this case, or re-drape."
         )
 
     return ZozoPreparation(
@@ -715,4 +729,5 @@ def prepare_for_zozo(
         body_group_name=body_group_name,
         project_name=_project_name(collection.name),
         self_intersection=intersection,
+        shell_isect=shell_report,
     )
