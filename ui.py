@@ -95,6 +95,40 @@ def _version() -> str:
         return "?"
 
 
+def _wrap_status_lines(text: str, width: int = 52) -> list[str]:
+    """Split status text into panel lines (no icons; message box only)."""
+    raw = (text or "").strip() or "Ready"
+    lines: list[str] = []
+    for paragraph in raw.replace("\r\n", "\n").split("\n"):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        while len(paragraph) > width:
+            cut = paragraph.rfind(" ", 0, width)
+            if cut < width // 2:
+                cut = width
+            lines.append(paragraph[:cut].rstrip())
+            paragraph = paragraph[cut:].lstrip()
+        if paragraph:
+            lines.append(paragraph)
+    return lines or ["Ready"]
+
+
+def _draw_status_box(layout, props) -> None:
+    """Large multi-line status area; text only (no alert icons)."""
+    box = layout.box()
+    header = box.row()
+    header.label(text="Message")
+    col = box.column(align=True)
+    col.scale_y = 1.05
+    lines = _wrap_status_lines(props.parse_status, width=46)
+    # Reserve vertical space so long Prepare/shell-isect notes stay readable.
+    while len(lines) < 6:
+        lines.append("")
+    for line in lines[:14]:
+        col.label(text=line if line else " ")
+
+
 def _mesh_object_poll(_properties, obj: Object) -> bool:
     """Only allow actual mesh objects in the shared Body field."""
     return obj.type == "MESH"
@@ -363,7 +397,9 @@ class YohsaiProperties(PropertyGroup):
     )
     parse_status: StringProperty(
         name="Status",
+        description="Status and warnings (panel message area only; not operator error icons)",
         default="Ready",
+        options={"TEXTEDIT_UPDATE"},
     )
     clothes_collection: PointerProperty(
         name="Clothes",
@@ -632,11 +668,26 @@ class YOHSAI_OT_prepare_zozo(Operator):
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
 
+        notes: list[str] = []
+        if not prepared.self_intersection.resolved:
+            notes.append(f"warning: {prepared.self_intersection.summary()}")
+        if (
+            prepared.shell_isect.available
+            and prepared.shell_isect.pairs_after > 0
+        ):
+            notes.append(
+                f"warning: {prepared.shell_isect.summary()} "
+                f"(local-fix={prepared.shell_isect.fix_status})"
+            )
+        elif prepared.shell_isect.available:
+            notes.append(prepared.shell_isect.summary())
+        else:
+            notes.append(prepared.shell_isect.summary())
+
         summary = (
             f"Prepared {prepared.seam_count} ZOZO stitches "
-            f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm); "
-            f"{prepared.self_intersection.summary()}; "
-            f"{prepared.shell_isect.summary()}"
+            f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm). "
+            + " ".join(notes)
         )
         try:
             config_path = Path(_parser_data_dir()) / _ZOZO_CONFIG_FILENAME
@@ -658,16 +709,15 @@ class YOHSAI_OT_prepare_zozo(Operator):
             )
             _zozo_scene_name = context.scene.name
             _zozo_prepared_summary = summary
+            # Status box only — no operator report icon for prepare success/warnings.
             props.parse_status = f"{summary}; configuring ZOZO MCP on :{ZOZO_MCP_PORT}..."
             if not bpy.app.timers.is_registered(_poll_zozo_mcp):
                 bpy.app.timers.register(_poll_zozo_mcp, first_interval=0.2)
-            self.report({"INFO"}, f"{summary}; configuring ZOZO.")
         except Exception as exc:
             message = str(exc).strip() or type(exc).__name__
             props.parse_status = (
-                f"{summary}; copies are ready, but MCP could not start: {message[:160]}"
+                f"{summary}; copies are ready, but MCP could not start: {message[:200]}"
             )
-            self.report({"WARNING"}, props.parse_status)
         return {"FINISHED"}
 
 
@@ -705,7 +755,8 @@ class YOHSAI_PT_main(Panel):
         gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
         gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal GRAVITY")
         actions.operator(YOHSAI_OT_prepare_zozo.bl_idname, text="Prepare for ZOZO")
-        layout.label(text=props.parse_status)
+        layout.separator(factor=0.5)
+        _draw_status_box(layout, props)
 
 
 class YOHSAI_OT_lock_selection(Operator):
