@@ -128,10 +128,17 @@ restarting Blender is unsupported.
 ## Prepare for ZOZO
 
 `Prepare for ZOZO` is available after at least one completed GRAVITY step. It
-does not modify, join, rename, hide, or move the source Yohsai parts. It creates
-a dedicated cloth copy with one active `Yohsai Pattern` UV map, loose stitch
-edges, and a dedicated Body collider copy that retains the Body's modifiers,
-parent, shape keys, and animation links.
+does not modify, join, rename, hide, or move the source Yohsai parts. Pipeline:
+
+1. Build internal ZOZO cloth / body copies (stitch opening, approximate unfold).
+2. **shell-isect check** (ZOZO-twin self-intersection detector).
+3. **shell-isect fix** (local-only repair; may be a no-op until the DLL grows cases).
+4. **shell-isect check** again.
+5. **NG** — write the error (pair counts + face-pair indices) to the status line,
+   keep the copies for inspection, **do not** configure ZOZO. Settle with
+   Normal or Zero GRAVITY and press Prepare again.
+6. **PASS** (zero pairs) — configure ZOZO Contact Solver over MCP and leave the
+   hand-off ready for Transfer / Run.
 
 ZOZO cannot start with two contact surfaces exactly coincident. On the copy
 only, each loose stitch is opened to at least 2.21 mm: 1.1 times the two 1 mm
@@ -139,19 +146,19 @@ contact gaps plus 0.01 mm. A seam still more than 10 mm open is rejected; use
 Zero GRAVITY to close it first. The original completed garment remains the
 authoritative Yohsai state.
 
-The button configures ZOZO Contact Solver through its localhost MCP endpoint at
-`http://localhost:9633/mcp`. It replaces only the two groups named for the
-selected Yohsai collection, creates a SHELL and STATIC group, uses absolute 1
-mm contact gaps, preserves the initial fitted shape as the bending rest shape,
-and sets conservative damping and five inactive-momentum frames. If the Body
-copy deforms through an Armature, Lattice, Mesh Deform, shape keys, or drivers,
-the MCP client also records its deformation cache.
+On PASS the button configures ZOZO through `http://localhost:9633/mcp`. It
+replaces only the two groups named for the selected Yohsai collection, creates
+a SHELL and STATIC group, uses absolute 1 mm contact gaps, preserves the
+initial fitted shape as the bending rest shape, and sets conservative damping
+and five inactive-momentum frames. If the Body copy deforms through an
+Armature, Lattice, Mesh Deform, shape keys, or drivers, the MCP client also
+records its deformation cache.
 
 MCP setup runs outside Blender's main thread so ZOZO can safely execute its
-queued Blender operations. If the MCP server is stopped, the hand-off copies
-remain valid: start ZOZO MCP on port 9633 and press Prepare again. Yohsai never
-starts Transfer or the simulation automatically; inspect the groups, then use
-ZOZO's `Transfer` and `Run Simulation` controls.
+queued Blender operations. Yohsai never starts Transfer or the simulation
+automatically; inspect the groups, then use ZOZO's `Transfer` and
+`Run Simulation` controls. `shell_isect.dll` lives under `bin/` (or
+`SHELL_ISECT_DLL`).
 
 ## Update
 

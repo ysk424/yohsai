@@ -636,8 +636,8 @@ class YOHSAI_OT_prepare_zozo(Operator):
     bl_idname = "yohsai.prepare_zozo"
     bl_label = "Prepare for ZOZO"
     bl_description = (
-        "Create solver-owned cloth and animated Body copies, then configure "
-        f"ZOZO Contact Solver through its MCP server on port {ZOZO_MCP_PORT}"
+        "Build ZOZO cloth/body copies, run shell-isect check→fix→check; "
+        f"on PASS configure ZOZO MCP on port {ZOZO_MCP_PORT}. On NG, stop and report"
     )
     bl_options = {"REGISTER"}
 
@@ -659,33 +659,23 @@ class YOHSAI_OT_prepare_zozo(Operator):
             )
         except ZozoHandoffError as exc:
             message = str(exc).strip() or type(exc).__name__
-            props.parse_status = f"Prepare for ZOZO failed: {message[:220]}"
-            self.report({"ERROR"}, message)
+            # Full dump in the multi-line status box (shell-isect face pairs).
+            props.parse_status = f"Prepare for ZOZO stopped: {message}"
+            self.report({"ERROR"}, message[:256])
             return {"CANCELLED"}
         except Exception as exc:
             message = str(exc).strip() or type(exc).__name__
-            props.parse_status = f"Prepare for ZOZO failed: {message[:220]}"
-            self.report({"ERROR"}, message)
+            props.parse_status = f"Prepare for ZOZO failed: {message}"
+            self.report({"ERROR"}, message[:256])
             return {"CANCELLED"}
 
-        notes: list[str] = []
+        # shell-isect already passed inside prepare_for_zozo; export + MCP only.
+        notes: list[str] = [prepared.shell_isect.summary()]
         if not prepared.self_intersection.resolved:
-            notes.append(f"warning: {prepared.self_intersection.summary()}")
-        if (
-            prepared.shell_isect.available
-            and prepared.shell_isect.pairs_after > 0
-        ):
-            notes.append(
-                f"warning: {prepared.shell_isect.summary()} "
-                f"(local-fix={prepared.shell_isect.fix_status})"
-            )
-        elif prepared.shell_isect.available:
-            notes.append(prepared.shell_isect.summary())
-        else:
-            notes.append(prepared.shell_isect.summary())
+            notes.append(f"note: {prepared.self_intersection.summary()}")
 
         summary = (
-            f"Prepared {prepared.seam_count} ZOZO stitches "
+            f"shell-isect PASS. Prepared {prepared.seam_count} ZOZO stitches "
             f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm). "
             + " ".join(notes)
         )

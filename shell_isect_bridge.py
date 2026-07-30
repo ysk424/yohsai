@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Optional bridge to the shell-isect library (check + local-fix).
+"""Bridge to shell-isect (ZOZO-twin check + local-only fix).
 
 Yohsai pins shell-isect **0.10.x**. Read shell-isect PROCEDURE.md before
 changing how this module calls the DLL.
 
+Host pipeline for Prepare for ZOZO:
+
+  build cloth mesh → check → fix → check again
+  → PASS (pairs == 0): continue ZOZO export / MCP
+  → NG: report error kind + face-pair indices; stop (no MCP)
+
 Environment:
   SHELL_ISECT_DLL  full path to shell_isect.dll (Windows) / libshell_isect.so
-
-If the library is missing or too old, callers get a soft result and must not
-treat the mesh as Transfer-clean based on this bridge alone.
 """
 
 from __future__ import annotations
@@ -22,9 +25,10 @@ import bpy
 import numpy as np
 
 
-# Host pin: first release that exposes check + fix stub.
 REQUIRED_MAJOR = 0
 REQUIRED_MINOR = 10
+# Cap for face-pair dump returned to the host status line.
+_MAX_REPORT_PAIRS = 64
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,13 @@ class ShellIsectReport:
     pairs_after: int
     fix_status: str
     message: str
+    # Face-index pairs from the *final* check (after fix), i < j.
+    pairs: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        """True only when the twin-check ends with zero pairs."""
+        return self.available and self.pairs_after == 0 and self.pairs_before >= 0
 
     def summary(self) -> str:
         if not self.available:
@@ -43,6 +54,32 @@ class ShellIsectReport:
             f"shell-isect {self.version}: pairs {self.pairs_before}->{self.pairs_after} "
             f"fix={self.fix_status}"
         )
+
+    def error_report(self) -> str:
+        """Human-readable NG dump: kind + locations for the user / status box."""
+        if not self.available:
+            return (
+                f"shell-isect unavailable ({self.message}). "
+                "Install shell_isect.dll under bin/ or set SHELL_ISECT_DLL."
+            )
+        if self.pairs_before < 0 or self.pairs_after < 0:
+            return f"shell-isect failed: {self.message}"
+        lines = [
+            "shell-isect NG: self-intersection (tri-tri face pairs).",
+            self.summary(),
+            f"remaining_pairs={self.pairs_after}",
+        ]
+        if self.pairs:
+            shown = self.pairs[:_MAX_REPORT_PAIRS]
+            pair_txt = ", ".join(f"({a},{b})" for a, b in shown)
+            if self.pairs_after > len(shown):
+                pair_txt += f", ... (+{self.pairs_after - len(shown)} more)"
+            lines.append(f"face_pairs: {pair_txt}")
+        lines.append(
+            "Copies kept for inspection. Use Normal or Zero GRAVITY to settle "
+            "the drape slightly, then Prepare for ZOZO again."
+        )
+        return " ".join(lines)
 
 
 _lib = None
@@ -152,6 +189,15 @@ def _mesh_arrays_world(obj: bpy.types.Object) -> tuple[np.ndarray, np.ndarray]:
     return verts, np.ascontiguousarray(faces, dtype=np.int32)
 
 
+def _apply_world_verts(cloth: bpy.types.Object, world_verts: np.ndarray) -> None:
+    inverse = cloth.matrix_world.inverted_safe()
+    inv = np.asarray([tuple(row) for row in inverse], dtype=np.float64)
+    local = world_verts @ inv[:3, :3].T + inv[:3, 3]
+    flat = np.ascontiguousarray(local, dtype=np.float32)
+    cloth.data.vertices.foreach_set("co", flat.ravel())
+    cloth.data.update()
+
+
 _FIX_STATUS = {
     0: "NOOP",
     1: "APPLIED",
@@ -160,8 +206,37 @@ _FIX_STATUS = {
 }
 
 
+def _check_pairs(
+    lib,
+    verts: np.ndarray,
+    faces: np.ndarray,
+    *,
+    max_pairs: int = _MAX_REPORT_PAIRS,
+) -> tuple[int, tuple[tuple[int, int], ...], int]:
+    """Return (count, pairs, rc). count is total even if buffer overflowed."""
+    n_verts = ctypes.c_int32(verts.shape[0])
+    n_faces = ctypes.c_int32(faces.shape[0])
+    v_ptr = verts.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    f_ptr = faces.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+    count = ctypes.c_int32(0)
+    if max_pairs <= 0:
+        rc = lib.shell_isect_check(
+            v_ptr, n_verts, f_ptr, n_faces, None, 0, ctypes.byref(count)
+        )
+        return int(count.value), (), rc
+
+    buf = (ctypes.c_int32 * (max_pairs * 2))()
+    rc = lib.shell_isect_check(
+        v_ptr, n_verts, f_ptr, n_faces, buf, max_pairs, ctypes.byref(count)
+    )
+    total = int(count.value)
+    n_write = min(total, max_pairs)
+    pairs = tuple((int(buf[2 * i]), int(buf[2 * i + 1])) for i in range(n_write))
+    return total, pairs, rc
+
+
 def run_check_and_fix(cloth: bpy.types.Object) -> ShellIsectReport:
-    """Run shell-isect check → fix → (report). Does not write verts on NOOP stub."""
+    """Run shell-isect: check → fix → check. Apply verts when fix moves them."""
     lib = _load_library()
     if lib is None:
         return ShellIsectReport(
@@ -171,6 +246,7 @@ def run_check_and_fix(cloth: bpy.types.Object) -> ShellIsectReport:
             pairs_after=-1,
             fix_status="UNAVAILABLE",
             message=_lib_error or "unavailable",
+            pairs=(),
         )
 
     version = lib.shell_isect_version().decode("utf-8", errors="replace")
@@ -183,15 +259,11 @@ def run_check_and_fix(cloth: bpy.types.Object) -> ShellIsectReport:
             pairs_after=0,
             fix_status="NOOP",
             message="fewer than 2 triangles",
+            pairs=(),
         )
 
-    n_verts = ctypes.c_int32(verts.shape[0])
-    n_faces = ctypes.c_int32(faces.shape[0])
-    v_ptr = verts.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-    f_ptr = faces.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
-
-    before = ctypes.c_int32(0)
-    rc = lib.shell_isect_check(v_ptr, n_verts, f_ptr, n_faces, None, 0, ctypes.byref(before))
+    # --- 1) check ---
+    before_count, _pairs_before, rc = _check_pairs(lib, verts, faces)
     if rc not in (0, 2):
         return ShellIsectReport(
             available=True,
@@ -200,13 +272,30 @@ def run_check_and_fix(cloth: bpy.types.Object) -> ShellIsectReport:
             pairs_after=-1,
             fix_status="FAILED",
             message=f"check failed rc={rc}",
+            pairs=(),
         )
 
+    if before_count == 0:
+        return ShellIsectReport(
+            available=True,
+            version=version,
+            pairs_before=0,
+            pairs_after=0,
+            fix_status="NOOP",
+            message="clean",
+            pairs=(),
+        )
+
+    # --- 2) fix ---
+    n_verts = ctypes.c_int32(verts.shape[0])
+    n_faces = ctypes.c_int32(faces.shape[0])
+    v_ptr = verts.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    f_ptr = faces.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
     out = np.empty_like(verts)
     out_ptr = out.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-    after = ctypes.c_int32(0)
-    status = ctypes.c_int32(3)
     before2 = ctypes.c_int32(0)
+    after_fix = ctypes.c_int32(0)
+    status = ctypes.c_int32(3)
     rc = lib.shell_isect_fix(
         v_ptr,
         out_ptr,
@@ -218,34 +307,46 @@ def run_check_and_fix(cloth: bpy.types.Object) -> ShellIsectReport:
         ctypes.byref(before2),
         None,
         0,
-        ctypes.byref(after),
+        ctypes.byref(after_fix),
         ctypes.byref(status),
     )
     if rc not in (0, 2):
         return ShellIsectReport(
             available=True,
             version=version,
-            pairs_before=int(before.value),
+            pairs_before=before_count,
             pairs_after=-1,
             fix_status="FAILED",
             message=f"fix failed rc={rc}",
+            pairs=(),
         )
 
     fix_name = _FIX_STATUS.get(int(status.value), f"STATUS_{int(status.value)}")
-    # v0.10 stub never moves; if a future fix CLEARED/APPLIED with writes, apply world→local.
-    if fix_name in ("APPLIED", "CLEARED") and int(after.value) == 0:
-        inverse = cloth.matrix_world.inverted_safe()
-        inv = np.asarray([tuple(row) for row in inverse], dtype=np.float64)
-        local = out @ inv[:3, :3].T + inv[:3, 3]
-        flat = np.ascontiguousarray(local, dtype=np.float32)
-        cloth.data.vertices.foreach_set("co", flat.ravel())
-        cloth.data.update()
+    working = verts
+    if fix_name in ("APPLIED", "CLEARED"):
+        # Local-fix wrote a new buffer; always apply when status claims a write.
+        _apply_world_verts(cloth, out)
+        working = out
+
+    # --- 3) check again (on the mesh that will be handed to ZOZO) ---
+    after_count, pairs_after, rc = _check_pairs(lib, working, faces)
+    if rc not in (0, 2):
+        return ShellIsectReport(
+            available=True,
+            version=version,
+            pairs_before=before_count,
+            pairs_after=-1,
+            fix_status=fix_name,
+            message=f"re-check failed rc={rc}",
+            pairs=(),
+        )
 
     return ShellIsectReport(
         available=True,
         version=version,
-        pairs_before=int(before2.value if before2.value else before.value),
-        pairs_after=int(after.value),
+        pairs_before=int(before2.value) if before2.value else before_count,
+        pairs_after=after_count,
         fix_status=fix_name,
-        message="ok",
+        message="ok" if after_count == 0 else "pairs remain after fix",
+        pairs=pairs_after,
     )

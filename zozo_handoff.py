@@ -697,15 +697,26 @@ def prepare_for_zozo(
     cloth["yohsai_zozo_group"] = cloth_group_name
     body_copy["yohsai_zozo_group"] = body_group_name
 
-    # shell-isect 0.10.x: check + local-fix stub (see shell-isect PROCEDURE.md).
-    # Residual self-intersect / pairs are status-line warnings only (0.10.1+);
-    # they no longer abort Prepare or block MCP setup.
+    # shell-isect pipeline (PROCEDURE): mesh already built → check → fix → check.
+    # PASS (pairs == 0) continues to ZOZO MCP. NG writes the error and aborts
+    # without configuring ZOZO; user settles with GRAVITY and presses again.
     shell_report = run_check_and_fix(cloth)
     cloth["yohsai_shell_isect"] = shell_report.summary()
-    cloth["yohsai_self_intersect_warning"] = (
-        not intersection.resolved
-        or (shell_report.available and shell_report.pairs_after > 0)
-    )
+    cloth["yohsai_shell_isect_pairs_before"] = int(shell_report.pairs_before)
+    cloth["yohsai_shell_isect_pairs_after"] = int(shell_report.pairs_after)
+    cloth["yohsai_shell_isect_fix"] = shell_report.fix_status
+    if shell_report.pairs:
+        cloth["yohsai_shell_isect_face_pairs"] = [
+            f"{a},{b}" for a, b in shell_report.pairs
+        ]
+    elif "yohsai_shell_isect_face_pairs" in cloth:
+        del cloth["yohsai_shell_isect_face_pairs"]
+
+    if not shell_report.passed:
+        cloth["yohsai_self_intersect_warning"] = True
+        raise ZozoHandoffError(shell_report.error_report())
+
+    cloth["yohsai_self_intersect_warning"] = not intersection.resolved
 
     return ZozoPreparation(
         collection=handoff,
