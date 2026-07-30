@@ -338,7 +338,12 @@ def _poll_zozo_mcp() -> float | None:
             )
         else:
             capture = str(result.get("capture", "not needed"))
-            _set_zozo_status(f"{summary}; ZOZO MCP ready ({capture}). Use Transfer, then Run Simulation.")
+            connection = str(result.get("connection", "")).strip()
+            conn_note = f"; {connection}" if connection else ""
+            _set_zozo_status(
+                f"{summary}; ZOZO MCP ready ({capture}){conn_note}. "
+                "Use Transfer, then Run Simulation."
+            )
     except Exception as exc:
         diagnostic = stderr.strip() or stdout.strip() or str(exc)
         _set_zozo_status(f"{summary}; ZOZO MCP response failed: {diagnostic[:170]}")

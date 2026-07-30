@@ -4,6 +4,10 @@
 This must not run on Blender's main thread: ZOZO MCP queues every mutation
 back to that thread.  A synchronous request from a Blender operator would
 therefore wait on itself.
+
+The sequence matches the official Contact Solver MCP setup path:
+  delete owned groups → create SHELL/STATIC → add_objects_to_group →
+  set material / scene parameters → optional static deformation capture.
 """
 
 from __future__ import annotations
@@ -64,7 +68,7 @@ class MCPClient:
                 "params": {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "yohsai", "version": "0.8.0"},
+                    "clientInfo": {"name": "yohsai", "version": "0.9.3"},
                 },
             },
             timeout=5.0,
@@ -117,24 +121,145 @@ class MCPClient:
         self.session_id = None
 
 
+def _group_uuid(payload: dict) -> str:
+    uuid = payload.get("group_uuid") or (payload.get("group") or {}).get("uuid")
+    if not uuid:
+        raise RuntimeError(f"ZOZO MCP create_group returned no group_uuid: {payload!r}")
+    return str(uuid)
+
+
+def _delete_owned_groups(client: MCPClient, owned_names: set[str]) -> None:
+    groups = client.call_tool("get_active_groups").get("groups", [])
+    for group in groups:
+        name = group.get("name")
+        uuid = group.get("uuid")
+        if name in owned_names and uuid:
+            client.call_tool("delete_group", {"group_uuid": uuid})
+
+
+def _assign_object(
+    client: MCPClient,
+    *,
+    group_uuid: str,
+    object_name: str,
+    role: str,
+) -> None:
+    """Add one Blender object to a ZOZO dynamics group and verify membership."""
+    result = client.call_tool(
+        "add_objects_to_group",
+        {"group_uuid": group_uuid, "object_names": [object_name]},
+    )
+    warnings = result.get("warnings") or []
+    added = {
+        item.get("name")
+        for item in (result.get("added_objects") or [])
+        if isinstance(item, dict)
+    }
+    if object_name not in added:
+        detail = "; ".join(str(w) for w in warnings) if warnings else "object was not added"
+        raise RuntimeError(
+            f"Failed to assign {role} object '{object_name}' to ZOZO group {group_uuid}: {detail}"
+        )
+    if warnings:
+        # Soft warnings after a successful add (e.g. name renames) stay informative only.
+        pass
+
+    membership = client.call_tool("get_group_objects", {"group_uuid": group_uuid})
+    member_names = {
+        item.get("name")
+        for item in (membership.get("objects") or membership.get("assigned_objects") or [])
+        if isinstance(item, dict)
+    }
+    # Some handler versions only return the serialized group.
+    if not member_names and isinstance(membership.get("group"), dict):
+        member_names = {
+            item.get("name")
+            for item in (membership["group"].get("assigned_objects") or [])
+            if isinstance(item, dict)
+        }
+    if member_names and object_name not in member_names:
+        raise RuntimeError(
+            f"ZOZO group {group_uuid} does not list {role} object '{object_name}' after assignment."
+        )
+
+
+def _connection_summary(client: MCPClient) -> str:
+    """Best-effort backend status for the status line; never fails setup."""
+    try:
+        info = client.call_tool("get_connection_info")
+    except Exception as exc:
+        return f"connection unknown ({type(exc).__name__})"
+    status = info.get("connection_status") or {}
+    connected = bool(status.get("connected"))
+    running = bool(status.get("server_running"))
+    ctype = status.get("type") or "unknown"
+    project = (info.get("project_info") or {}).get("project_name") or ""
+    if connected and running:
+        base = f"solver connected ({ctype}"
+    elif connected:
+        base = f"solver connected, server not running ({ctype}"
+    else:
+        base = f"solver not connected ({ctype}"
+    if project:
+        base += f", project={project}"
+    return base + ")"
+
+
+def _capture_body_deformation(
+    client: MCPClient,
+    *,
+    body_uuid: str,
+    body_object: str,
+    timeout_seconds: float,
+) -> str:
+    deformation = client.call_tool(
+        "get_static_deformation_status",
+        {"group_uuid": body_uuid, "object_name": body_object},
+    )
+    if not deformation.get("is_deforming"):
+        return "not needed"
+    if not deformation.get("has_cache"):
+        client.call_tool(
+            "capture_static_deformation",
+            {"group_uuid": body_uuid, "object_name": body_object},
+        )
+    deadline = time.monotonic() + float(timeout_seconds)
+    while True:
+        deformation = client.call_tool(
+            "get_static_deformation_status",
+            {"group_uuid": body_uuid, "object_name": body_object},
+        )
+        if deformation.get("has_cache") and int(deformation.get("frame_count", 0)) > 0:
+            return f"captured {int(deformation['frame_count'])} body frames"
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"ZOZO Body deformation capture did not finish within {timeout_seconds:.0f} seconds."
+            )
+        time.sleep(0.25)
+
+
 def _configure(config: dict) -> dict:
     client = MCPClient(int(config["port"]))
-    capture = "not needed"
     try:
         client.initialize()
-        groups = client.call_tool("get_active_groups").get("groups", [])
-        owned_names = {config["cloth_group"], config["body_group"]}
-        for group in groups:
-            if group.get("name") in owned_names and group.get("uuid"):
-                client.call_tool("delete_group", {"group_uuid": group["uuid"]})
+        connection = _connection_summary(client)
+
+        cloth_group = str(config["cloth_group"])
+        body_group = str(config["body_group"])
+        cloth_object = str(config["cloth_object"])
+        body_object = str(config["body_object"])
+
+        _delete_owned_groups(client, {cloth_group, body_group})
 
         cloth = client.call_tool(
-            "create_group", {"name": config["cloth_group"], "type": "SHELL"}
+            "create_group", {"name": cloth_group, "type": "SHELL"}
         )
-        cloth_uuid = str(cloth["group_uuid"])
-        client.call_tool(
-            "add_objects_to_group",
-            {"group_uuid": cloth_uuid, "object_names": [config["cloth_object"]]},
+        cloth_uuid = _group_uuid(cloth)
+        _assign_object(
+            client,
+            group_uuid=cloth_uuid,
+            object_name=cloth_object,
+            role="cloth",
         )
         client.call_tool(
             "set_group_material_properties",
@@ -142,12 +267,14 @@ def _configure(config: dict) -> dict:
         )
 
         body = client.call_tool(
-            "create_group", {"name": config["body_group"], "type": "STATIC"}
+            "create_group", {"name": body_group, "type": "STATIC"}
         )
-        body_uuid = str(body["group_uuid"])
-        client.call_tool(
-            "add_objects_to_group",
-            {"group_uuid": body_uuid, "object_names": [config["body_object"]]},
+        body_uuid = _group_uuid(body)
+        _assign_object(
+            client,
+            group_uuid=body_uuid,
+            object_name=body_object,
+            role="body",
         )
         client.call_tool(
             "set_group_material_properties",
@@ -155,35 +282,25 @@ def _configure(config: dict) -> dict:
         )
         client.call_tool("set_scene_parameters", config["scene_parameters"])
 
-        deformation = client.call_tool(
-            "get_static_deformation_status",
-            {"group_uuid": body_uuid, "object_name": config["body_object"]},
+        capture = _capture_body_deformation(
+            client,
+            body_uuid=body_uuid,
+            body_object=body_object,
+            timeout_seconds=float(config.get("capture_timeout_seconds", 300.0)),
         )
-        if deformation.get("is_deforming"):
-            if not deformation.get("has_cache"):
-                client.call_tool(
-                    "capture_static_deformation",
-                    {"group_uuid": body_uuid, "object_name": config["body_object"]},
-                )
-            deadline = time.monotonic() + float(config.get("capture_timeout_seconds", 300.0))
-            while True:
-                deformation = client.call_tool(
-                    "get_static_deformation_status",
-                    {"group_uuid": body_uuid, "object_name": config["body_object"]},
-                )
-                if deformation.get("has_cache") and int(deformation.get("frame_count", 0)) > 0:
-                    capture = f"captured {int(deformation['frame_count'])} body frames"
-                    break
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("ZOZO Body deformation capture did not finish within 300 seconds.")
-                time.sleep(0.25)
 
         return {
             "status": "success",
-            "message": "ZOZO groups are ready; inspect them, then use Transfer and Run Simulation.",
+            "message": (
+                "ZOZO groups are ready with cloth and body assigned; "
+                "inspect them, then use Transfer and Run Simulation."
+            ),
             "cloth_group_uuid": cloth_uuid,
             "body_group_uuid": body_uuid,
+            "cloth_object": cloth_object,
+            "body_object": body_object,
             "capture": capture,
+            "connection": connection,
         }
     finally:
         client.close()
