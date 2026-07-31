@@ -56,30 +56,23 @@ class ShellIsectReport:
         )
 
     def error_report(self) -> str:
-        """Human-readable NG dump: kind + locations for the user / status box."""
+        """User-facing NG text for the status box (no internal tool names)."""
         if not self.available:
-            return (
-                f"shell-isect unavailable ({self.message}). "
-                "Install shell_isect.dll under bin/ or set SHELL_ISECT_DLL."
-            )
+            return f"ERROR: self-intersection check unavailable ({self.message})"
         if self.pairs_before < 0 or self.pairs_after < 0:
-            return f"shell-isect failed: {self.message}"
-        lines = [
-            "shell-isect NG: self-intersection (tri-tri face pairs).",
-            self.summary(),
-            f"remaining_pairs={self.pairs_after}",
-        ]
+            return f"ERROR: self-intersection check failed ({self.message})"
+        # e.g. ERROR: self-intersection (tri-tri face pairs): pairs 1->1 fix=NOOP face_pairs: (a,b)
+        text = (
+            "ERROR: self-intersection (tri-tri face pairs): "
+            f"pairs {self.pairs_before}->{self.pairs_after} fix={self.fix_status}"
+        )
         if self.pairs:
             shown = self.pairs[:_MAX_REPORT_PAIRS]
             pair_txt = ", ".join(f"({a},{b})" for a, b in shown)
             if self.pairs_after > len(shown):
                 pair_txt += f", ... (+{self.pairs_after - len(shown)} more)"
-            lines.append(f"face_pairs: {pair_txt}")
-        lines.append(
-            "Copies kept for inspection. Use Normal or Zero GRAVITY to settle "
-            "the drape slightly, then Prepare for ZOZO again."
-        )
-        return " ".join(lines)
+            text += f" face_pairs: {pair_txt}"
+        return text
 
 
 _lib = None

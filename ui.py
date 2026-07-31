@@ -659,25 +659,28 @@ class YOHSAI_OT_prepare_zozo(Operator):
             )
         except ZozoHandoffError as exc:
             message = str(exc).strip() or type(exc).__name__
-            # Full dump in the multi-line status box (shell-isect face pairs).
+            # Status box only — never self.report ERROR (avoids レポート:エラー).
             props.parse_status = f"Prepare for ZOZO stopped: {message}"
-            self.report({"ERROR"}, message[:256])
             return {"CANCELLED"}
         except Exception as exc:
             message = str(exc).strip() or type(exc).__name__
             props.parse_status = f"Prepare for ZOZO failed: {message}"
-            self.report({"ERROR"}, message[:256])
             return {"CANCELLED"}
 
-        # shell-isect already passed inside prepare_for_zozo; export + MCP only.
-        notes: list[str] = [prepared.shell_isect.summary()]
+        # shell-isect NG and other soft stops: status box only, no MCP / no report.
+        if prepared.abort_message:
+            props.parse_status = f"Prepare for ZOZO stopped: {prepared.abort_message}"
+            return {"CANCELLED"}
+
+        # Self-intersection check already passed inside prepare_for_zozo; MCP only.
+        notes: list[str] = []
         if not prepared.self_intersection.resolved:
             notes.append(f"note: {prepared.self_intersection.summary()}")
 
         summary = (
-            f"shell-isect PASS. Prepared {prepared.seam_count} ZOZO stitches "
-            f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm). "
-            + " ".join(notes)
+            f"Prepared {prepared.seam_count} ZOZO stitches "
+            f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm)"
+            + (("; " + " ".join(notes)) if notes else "")
         )
         try:
             config_path = Path(_parser_data_dir()) / _ZOZO_CONFIG_FILENAME

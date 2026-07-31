@@ -73,7 +73,7 @@ class SelfIntersectionResult:
 class ZozoPreparation:
     collection: bpy.types.Collection
     cloth_object: bpy.types.Object
-    body_object: bpy.types.Object
+    body_object: bpy.types.Object | None
     seam_count: int
     maximum_input_seam_distance_m: float
     minimum_output_seam_distance_m: float
@@ -82,8 +82,13 @@ class ZozoPreparation:
     project_name: str
     self_intersection: SelfIntersectionResult
     shell_isect: ShellIsectReport
+    # Soft-stop (e.g. shell-isect NG): status box only, no body export / MCP.
+    # Prefer this over raising so Blender never auto-reports as レポート:エラー.
+    abort_message: str | None = None
 
     def mcp_configuration(self, scene: bpy.types.Scene) -> dict:
+        if self.body_object is None:
+            raise ZozoHandoffError("ZOZO body was not exported; cannot configure MCP.")
         fps = max(1, int(round(float(scene.render.fps) / float(scene.render.fps_base))))
         return {
             "port": ZOZO_MCP_PORT,
@@ -681,7 +686,6 @@ def prepare_for_zozo(
     # Unfold the gather-drape's self-intersections so ppf/ZOZO accepts the shell.
     try:
         intersection = _resolve_self_intersections(cloth, bvh)
-        body_copy = _create_body_object(handoff, collection, body)
     except Exception:
         _remove_object_and_owned_mesh(cloth)
         raise
@@ -695,11 +699,10 @@ def prepare_for_zozo(
     cloth_group_name = f"Yohsai {collection.name} Cloth"
     body_group_name = f"Yohsai {collection.name} Body"
     cloth["yohsai_zozo_group"] = cloth_group_name
-    body_copy["yohsai_zozo_group"] = body_group_name
 
-    # shell-isect pipeline (PROCEDURE): mesh already built → check → fix → check.
-    # PASS (pairs == 0) continues to ZOZO MCP. NG writes the error and aborts
-    # without configuring ZOZO; user settles with GRAVITY and presses again.
+    # shell-isect pipeline (PROCEDURE): cloth mesh → check → fix → check.
+    # PASS (pairs == 0): create ZOZO body, then MCP.
+    # NG: report face pairs, keep cloth for inspection, no body export / no MCP.
     shell_report = run_check_and_fix(cloth)
     cloth["yohsai_shell_isect"] = shell_report.summary()
     cloth["yohsai_shell_isect_pairs_before"] = int(shell_report.pairs_before)
@@ -714,7 +717,30 @@ def prepare_for_zozo(
 
     if not shell_report.passed:
         cloth["yohsai_self_intersect_warning"] = True
-        raise ZozoHandoffError(shell_report.error_report())
+        # Do not raise: Blender surfaces uncaught/mismatched exceptions as
+        # レポート:エラー. Soft-abort keeps the message in the status box only.
+        return ZozoPreparation(
+            collection=handoff,
+            cloth_object=cloth,
+            body_object=None,
+            seam_count=len(seams),
+            maximum_input_seam_distance_m=maximum_before,
+            minimum_output_seam_distance_m=minimum_after,
+            cloth_group_name=cloth_group_name,
+            body_group_name=body_group_name,
+            project_name=_project_name(collection.name),
+            self_intersection=intersection,
+            shell_isect=shell_report,
+            abort_message=shell_report.error_report(),
+        )
+
+    # Body export only after shell-isect PASS.
+    try:
+        body_copy = _create_body_object(handoff, collection, body)
+    except Exception:
+        _remove_object_and_owned_mesh(cloth)
+        raise
+    body_copy["yohsai_zozo_group"] = body_group_name
 
     cloth["yohsai_self_intersect_warning"] = not intersection.resolved
 
