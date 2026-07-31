@@ -170,23 +170,28 @@ def _load_library():
 
 
 def _mesh_arrays_world(obj: bpy.types.Object) -> tuple[np.ndarray, np.ndarray]:
-    """Return (V float64 Nx3 world, F int32 Mx3) triangulating ngons as fans."""
+    """Return (V float64 Nx3 world, F int32 Mx3) for twin-check.
+
+    Triangulation matches ZOZO/ppf encoder: Blender ``loop_triangles`` (see
+    ppf-contact-solver ``numpy_mesh_utils.loop_triangle_indices``). A naive
+    fan-from-first-vertex diverges on quads/N-gons and was a primary source of
+    false PASS against Transfer's 9 tri-tri self-intersections.
+    """
     mesh = obj.data
     n = len(mesh.vertices)
     local = np.empty((n, 3), dtype=np.float64)
     mesh.vertices.foreach_get("co", local.ravel())
     matrix = np.asarray([tuple(row) for row in obj.matrix_world], dtype=np.float64)
     verts = np.ascontiguousarray(local @ matrix[:3, :3].T + matrix[:3, 3])
-    faces: list[tuple[int, int, int]] = []
-    for poly in mesh.polygons:
-        idx = [int(v) for v in poly.vertices]
-        if len(idx) < 3:
-            continue
-        for i in range(1, len(idx) - 1):
-            faces.append((idx[0], idx[i], idx[i + 1]))
-    if not faces:
+
+    mesh.calc_loop_triangles()
+    n_tri = len(mesh.loop_triangles)
+    if n_tri == 0:
         return verts, np.zeros((0, 3), dtype=np.int32)
-    return verts, np.ascontiguousarray(faces, dtype=np.int32)
+    flat = np.empty(n_tri * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("vertices", flat)
+    faces = np.ascontiguousarray(flat.reshape(n_tri, 3), dtype=np.int32)
+    return verts, faces
 
 
 def _apply_world_verts(cloth: bpy.types.Object, world_verts: np.ndarray) -> None:
