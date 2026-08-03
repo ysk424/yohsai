@@ -6,13 +6,18 @@ changing how this module calls the DLL.
 
 Host pipeline for Prepare for ZOZO:
 
-  build cloth + body copies → check (cloth+body, ZOZO-twin) → fix → check
+  build cloth + body copies → check → optional local fix → check
   → PASS (pairs == 0): continue ZOZO MCP
   → NG: report error kind + face-pair indices; stop (no MCP)
 
-The Transfer-time twin includes STATIC body triangles as colliders (ppf
-``fixed_scene_assemble``): cloth–cloth and cloth–body pairs count; body–body
-pairs are skipped. Detection builds the same combined mesh here.
+**Default (practical):** cloth-only shell-isect (``include_body=False``).
+High-poly CC bodies make cloth+body twin checks take many minutes; the body
+path remains fully implemented and is enabled only when the operator requests
+it (UI: "Shell-isect vs Body").
+
+Full ZOZO-twin mode (``include_body=True``) matches Transfer-time colliders
+(ppf ``fixed_scene_assemble``): cloth–cloth and cloth–body pairs count;
+body–body pairs are skipped.
 
 Environment:
   SHELL_ISECT_DLL  full path to shell_isect.dll (Windows) / libshell_isect.so
@@ -56,24 +61,28 @@ class ShellIsectReport:
     # first: 0 .. n_cloth_faces-1, then body).
     pairs: tuple[tuple[int, int], ...] = ()
     n_cloth_faces: int = 0
+    # False = cloth-only (default, fast). True = cloth+body ZOZO twin (slow).
+    include_body: bool = False
 
     @property
     def passed(self) -> bool:
-        """True only when the twin-check ends with zero pairs."""
+        """True only when the active check ends with zero pairs."""
         return self.available and self.pairs_after == 0 and self.pairs_before >= 0
 
     def version_suffix(self) -> str:
         """Trailing token for status messages (always present when known)."""
+        mode = "cloth+body" if self.include_body else "cloth-only"
         if self.version:
-            return f"shell-isect {self.version}"
-        return "shell-isect unavailable"
+            return f"shell-isect {self.version} {mode}"
+        return f"shell-isect unavailable {mode}"
 
     def summary(self) -> str:
         if not self.available:
             return f"shell-isect: {self.message}"
+        mode = "cloth+body" if self.include_body else "cloth-only"
         return (
-            f"shell-isect {self.version}: pairs {self.pairs_before}->{self.pairs_after} "
-            f"fix={self.fix_status}"
+            f"shell-isect {self.version} ({mode}): pairs "
+            f"{self.pairs_before}->{self.pairs_after} fix={self.fix_status}"
         )
 
     def _format_face(self, index: int) -> str:
@@ -607,14 +616,26 @@ def _local_fix_cloth_against_body(
 def run_check_and_fix(
     cloth: bpy.types.Object,
     body: bpy.types.Object | None = None,
+    *,
+    include_body: bool = False,
 ) -> ShellIsectReport:
     """Run shell-isect: check → local fix → check.
 
-    When ``body`` is provided (Prepare path), the check mesh is cloth+body
-    combined with STATIC body faces marked as colliders (PPF twin). Host-side
-    local fix pushes only NG cloth vertices outside the body (and gently
-    separates cloth–cloth pockets); topology and body verts are never edited.
+    Parameters
+    ----------
+    cloth:
+        ZOZO cloth copy (edited in place when a local fix applies).
+    body:
+        ZOZO body copy. Used only when ``include_body`` is True (and for the
+        optional body-aware local fix in that mode). Always still created by
+        Prepare; this flag only controls whether shell-isect *tests* against it.
+    include_body:
+        False (default): cloth-only pairs — practical runtime.
+        True: cloth+body combined mesh with STATIC body colliders (PPF twin).
+        Body–body pairs are filtered out. High-poly bodies can take many minutes.
     """
+    use_body = bool(include_body and body is not None)
+
     lib = _load_library()
     if lib is None:
         return ShellIsectReport(
@@ -626,13 +647,14 @@ def run_check_and_fix(
             message=_lib_error or "unavailable",
             pairs=(),
             n_cloth_faces=0,
+            include_body=use_body,
         )
 
     version = lib.shell_isect_version().decode("utf-8", errors="replace")
     cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
     n_cloth_faces = int(cloth_faces.shape[0])
 
-    if body is not None:
+    if use_body:
         verts, faces, n_cloth_faces, is_collider = _combined_cloth_body_arrays(
             cloth, body
         )
@@ -650,9 +672,10 @@ def run_check_and_fix(
             message="fewer than 2 triangles",
             pairs=(),
             n_cloth_faces=n_cloth_faces,
+            include_body=use_body,
         )
 
-    # --- 1) check (twin mesh) ---
+    # --- 1) check ---
     before_count, pairs_before, rc = _check_pairs(
         lib,
         verts,
@@ -670,18 +693,21 @@ def run_check_and_fix(
             message=f"check failed rc={rc}",
             pairs=(),
             n_cloth_faces=n_cloth_faces,
+            include_body=use_body,
         )
 
     if before_count == 0:
+        clean_msg = "clean" if use_body else "clean (cloth-only; body twin skipped)"
         return ShellIsectReport(
             available=True,
             version=version,
             pairs_before=0,
             pairs_after=0,
             fix_status="NOOP",
-            message="clean",
+            message=clean_msg,
             pairs=(),
             n_cloth_faces=n_cloth_faces,
+            include_body=use_body,
         )
 
     # Fetch full pair list for the local fix pocket.
@@ -702,6 +728,7 @@ def run_check_and_fix(
             message=f"check pairs failed rc={rc}",
             pairs=(),
             n_cloth_faces=n_cloth_faces,
+            include_body=use_body,
         )
 
     # --- 2) local fix (cloth verts only) ---
@@ -710,7 +737,8 @@ def run_check_and_fix(
     after_count = before_count
     pairs_after = pairs_before
 
-    if body is not None:
+    if use_body:
+        # Full twin path: body-aware local push + re-check on cloth+body.
         (
             _working,
             after_count,
@@ -727,11 +755,10 @@ def run_check_and_fix(
             pairs_before,
             before_count,
         )
-        # Re-read report pairs for UI (cap).
         if after_count > _MAX_REPORT_PAIRS:
             pairs_after = pairs_after[:_MAX_REPORT_PAIRS]
     else:
-        # Cloth-only path: keep DLL local-fix stub behaviour.
+        # Cloth-only path: DLL local-fix stub (no body mesh in the check).
         n_verts = ctypes.c_int32(cloth_verts.shape[0])
         n_faces_cloth = ctypes.c_int32(cloth_faces.shape[0])
         v_ptr = cloth_verts.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
@@ -765,6 +792,7 @@ def run_check_and_fix(
                 message=f"fix failed rc={rc}",
                 pairs=(),
                 n_cloth_faces=n_cloth_faces,
+                include_body=use_body,
             )
         fix_name = _FIX_STATUS.get(int(status.value), f"STATUS_{int(status.value)}")
         if fix_name in ("APPLIED", "CLEARED"):
@@ -783,8 +811,19 @@ def run_check_and_fix(
                 message=f"re-check failed rc={rc}",
                 pairs=(),
                 n_cloth_faces=n_cloth_faces,
+                include_body=use_body,
             )
-        message = "ok" if after_count == 0 else "pairs remain after fix"
+        message = (
+            "ok (cloth-only; body twin skipped)"
+            if after_count == 0
+            else "pairs remain after fix (cloth-only)"
+        )
+
+    final_message = message
+    if after_count == 0 and fix_name == "CLEARED":
+        final_message = "ok" if use_body else "ok (cloth-only; body twin skipped)"
+    elif after_count == 0 and not use_body and not message:
+        final_message = "ok (cloth-only; body twin skipped)"
 
     return ShellIsectReport(
         available=True,
@@ -792,7 +831,8 @@ def run_check_and_fix(
         pairs_before=before_count,
         pairs_after=after_count,
         fix_status=fix_name,
-        message=message if after_count else ("ok" if fix_name == "CLEARED" else message),
+        message=final_message,
         pairs=pairs_after[:_MAX_REPORT_PAIRS],
         n_cloth_faces=n_cloth_faces,
+        include_body=use_body,
     )

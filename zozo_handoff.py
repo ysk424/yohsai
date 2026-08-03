@@ -89,7 +89,12 @@ class ZozoPreparation:
     def mcp_configuration(self, scene: bpy.types.Scene) -> dict:
         if self.body_object is None:
             raise ZozoHandoffError("ZOZO body was not exported; cannot configure MCP.")
-        fps = max(1, int(round(float(scene.render.fps) / float(scene.render.fps_base))))
+        frame_start, frame_count, fps = _sync_scene_timeline_for_zozo(scene)
+        # Integer steps per display frame: 1/fps/N. Prefer N=8 when it fits the
+        # ZOZO step_size range (0.001–0.01); fall back to 0.005.
+        step_size = 1.0 / float(fps) / 8.0
+        if step_size < 0.001 or step_size > 0.01:
+            step_size = 0.005
         return {
             "port": ZOZO_MCP_PORT,
             "cloth_object": self.cloth_object.name,
@@ -97,9 +102,12 @@ class ZozoPreparation:
             "cloth_group": self.cloth_group_name,
             "body_group": self.body_group_name,
             "scene_parameters": {
-                "step_size": 0.005,
-                "frame_count": max(1, int(scene.frame_end) - int(scene.frame_start) + 1),
-                "frame_rate": fps,
+                "step_size": float(step_size),
+                "frame_start": int(frame_start),
+                "frame_count": int(frame_count),
+                "use_scene_frame_start": False,
+                "use_scene_fps": False,
+                "frame_rate": int(fps),
                 "gravity": [0.0, 0.0, -9.81],
                 "inactive_momentum_frames": 5,
                 "project_name": self.project_name,
@@ -117,6 +125,67 @@ class ZozoPreparation:
             },
             "capture_timeout_seconds": 300.0,
         }
+
+
+def _scene_fps(scene: bpy.types.Scene) -> int:
+    return max(1, int(round(float(scene.render.fps) / float(scene.render.fps_base))))
+
+
+def _intended_frame_range(scene: bpy.types.Scene) -> tuple[int, int]:
+    """Return inclusive (start, end) frames the user intends to simulate.
+
+    ZOZO's Scene panel Frame Count often tracks the preview range (or a prior
+    MCP write), while Blender's ``frame_end`` can lag behind. Fetch/bake then
+    only writes PC2 samples up to ``scene.frame_end``, so a UI that shows 250
+    frames may only produce ~22 on disk. Prefer the preview range when active,
+    and never choose a range shorter than the official scene range.
+    """
+    start = int(scene.frame_start)
+    end = int(scene.frame_end)
+    if bool(getattr(scene, "use_preview_range", False)):
+        p0 = int(scene.frame_preview_start)
+        p1 = int(scene.frame_preview_end)
+        start = min(start, p0)
+        end = max(end, p1)
+    # ZOZO also exposes simulation_frame_* on some Blender builds / add-on states.
+    try:
+        s0 = int(getattr(scene, "simulation_frame_start", start))
+        s1 = int(getattr(scene, "simulation_frame_end", end))
+        start = min(start, s0)
+        end = max(end, s1)
+    except (TypeError, ValueError):
+        pass
+    if end < start:
+        end = start
+    return start, end
+
+
+def _sync_scene_timeline_for_zozo(scene: bpy.types.Scene) -> tuple[int, int, int]:
+    """Align Blender timeline with ZOZO frame_count so Run/Fetch can write all frames.
+
+    Returns ``(frame_start, frame_count, fps)``.
+    """
+    start, end = _intended_frame_range(scene)
+    # ZOZO docs: frame_count minimum 10.
+    frame_count = max(10, end - start + 1)
+    end = start + frame_count - 1
+    fps = _scene_fps(scene)
+
+    scene.frame_start = int(start)
+    scene.frame_end = int(end)
+    # Keep preview range covering the full sim so the timeline scrub matches ZOZO.
+    if hasattr(scene, "frame_preview_start"):
+        scene.frame_preview_start = int(start)
+    if hasattr(scene, "frame_preview_end"):
+        scene.frame_preview_end = int(end)
+    try:
+        if hasattr(scene, "simulation_frame_start"):
+            scene.simulation_frame_start = int(start)
+        if hasattr(scene, "simulation_frame_end"):
+            scene.simulation_frame_end = int(end)
+    except (AttributeError, TypeError):
+        pass
+    return int(start), int(frame_count), int(fps)
 
 
 def _world_vertices(obj: bpy.types.Object) -> np.ndarray:
@@ -659,8 +728,15 @@ def prepare_for_zozo(
     context,
     collection: bpy.types.Collection | None,
     body: bpy.types.Object | None,
+    *,
+    shell_isect_include_body: bool = False,
 ) -> ZozoPreparation:
-    """Create solver-owned cloth/body copies and leave Yohsai untouched."""
+    """Create solver-owned cloth/body copies and leave Yohsai untouched.
+
+    ``shell_isect_include_body`` enables the full cloth+body twin check (slow on
+    high-poly characters). Default is cloth-only shell-isect for practical time;
+    the body copy is still built for ZOZO MCP / Transfer.
+    """
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise ZozoHandoffError("Select a loaded Yohsai Clothes collection first.")
     if body is None or body.type != "MESH":
@@ -709,11 +785,16 @@ def prepare_for_zozo(
     cloth["yohsai_zozo_group"] = cloth_group_name
     body_copy["yohsai_zozo_group"] = body_group_name
 
-    # shell-isect pipeline (PROCEDURE): cloth+body → check → fix → check.
+    # shell-isect: default cloth-only (fast). Optional cloth+body twin is slow.
     # PASS (pairs == 0): MCP. NG: report face pairs, keep copies, no MCP.
-    shell_report = run_check_and_fix(cloth, body_copy)
+    shell_report = run_check_and_fix(
+        cloth,
+        body_copy,
+        include_body=bool(shell_isect_include_body),
+    )
     cloth["yohsai_shell_isect"] = shell_report.summary()
     cloth["yohsai_shell_isect_version"] = shell_report.version
+    cloth["yohsai_shell_isect_include_body"] = bool(shell_report.include_body)
     cloth["yohsai_shell_isect_pairs_before"] = int(shell_report.pairs_before)
     cloth["yohsai_shell_isect_pairs_after"] = int(shell_report.pairs_after)
     cloth["yohsai_shell_isect_fix"] = shell_report.fix_status

@@ -131,19 +131,21 @@ restarting Blender is unsupported.
 does not modify, join, rename, hide, or move the source Yohsai parts. Pipeline:
 
 1. Build internal ZOZO **cloth** copy (stitch opening, approximate unfold).
-2. Build internal ZOZO **body** copy (required before twin-check).
-3. **shell-isect check** on **cloth + body** (ZOZO-twin: cloth–cloth and
-   cloth–body pairs; body–body collider pairs skipped, same as Transfer).
-4. **local fix** (NG cloth verts only: push outside body / small cloth–cloth
-   separation; topology and body unchanged; rollback if pair count rises).
-5. **shell-isect check** again on cloth + body.
+2. Build internal ZOZO **body** copy (always; ZOZO MCP / Transfer need it).
+3. **shell-isect check** — default **cloth-only** (fast, practical). Optional
+   panel toggle **Shell-isect vs Body** enables the full cloth+body twin
+   (cloth–cloth and cloth–body; body–body skipped). High-poly bodies can take
+   many minutes in twin mode; the body path remains in code when you need it.
+4. **local fix** when pairs remain (cloth-only DLL fix, or body-aware push when
+   twin mode is on). Topology and body verts are never edited.
+5. **shell-isect check** again (same mode as step 3).
 6. **NG** — write the error (pair counts + face-pair indices + shell-isect
-   version) to the status line, keep cloth/body copies for inspection,
+   version / mode) to the status line, keep cloth/body copies for inspection,
    **do not** configure ZOZO. Settle with Normal or Zero GRAVITY and press
    Prepare again.
 7. **PASS** (zero pairs) — configure ZOZO Contact Solver over MCP and leave the
    hand-off ready for Transfer / Run. Status messages end with
-   `[shell-isect x.y.z]`.
+   `[shell-isect x.y.z cloth-only]` or `[... cloth+body]`.
 
 ZOZO cannot start with two contact surfaces exactly coincident. On the copy
 only, each loose stitch is opened to at least 2.21 mm: 1.1 times the two 1 mm
@@ -155,9 +157,14 @@ On PASS the button configures ZOZO through `http://localhost:9633/mcp`. It
 replaces only the two groups named for the selected Yohsai collection, creates
 a SHELL and STATIC group, uses absolute 1 mm contact gaps, preserves the
 initial fitted shape as the bending rest shape, and sets conservative damping
-and five inactive-momentum frames. If the Body copy deforms through an
-Armature, Lattice, Mesh Deform, shape keys, or drivers, the MCP client also
-records its deformation cache.
+and five inactive-momentum frames. **Frame range:** Prepare takes the intended
+simulation length from the Blender scene range and, when active, the preview
+range / ZOZO simulation frames (whichever is longer), writes that
+`frame_count` to ZOZO, and **expands `scene.frame_end`** so Run/Fetch can
+actually write every PC2 sample (a common failure was UI showing 250 frames
+while Blender `frame_end` stayed at ~22 and only ~22 frames landed in the
+cache). If the Body copy deforms through an Armature, Lattice, Mesh Deform,
+shape keys, or drivers, the MCP client also records its deformation cache.
 
 MCP setup runs outside Blender's main thread so ZOZO can safely execute its
 queued Blender operations. Yohsai never starts Transfer or the simulation

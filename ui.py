@@ -561,6 +561,16 @@ class YohsaiProperties(PropertyGroup):
         default=True,
         update=_update_auto_lock,
     )
+    shell_isect_include_body: BoolProperty(
+        name="Shell-isect vs Body",
+        description=(
+            "When on, Prepare runs the full cloth+body shell-isect twin (slow on "
+            "high-poly bodies, can take many minutes). When off (default), only "
+            "cloth–cloth pairs are checked so Prepare stays practical. Body copy "
+            "is still built for ZOZO either way"
+        ),
+        default=False,
+    )
 
 
 class YOHSAI_OT_load_svg(Operator):
@@ -771,9 +781,10 @@ class YOHSAI_OT_prepare_zozo(Operator):
     bl_idname = "yohsai.prepare_zozo"
     bl_label = "Prepare for ZOZO"
     bl_description = (
-        "Build ZOZO cloth/body copies, run shell-isect on cloth+body "
-        "check→fix→check; on PASS start ZOZO MCP if needed and configure "
-        f"on port {ZOZO_MCP_PORT}. On NG, stop and report"
+        "Build ZOZO cloth/body copies, run shell-isect check→fix→check "
+        "(cloth-only by default; enable Shell-isect vs Body for full twin); "
+        f"on PASS start ZOZO MCP if needed and configure on port {ZOZO_MCP_PORT}. "
+        "On NG, stop and report"
     )
     bl_options = {"REGISTER"}
 
@@ -792,6 +803,7 @@ class YOHSAI_OT_prepare_zozo(Operator):
                 context,
                 props.clothes_collection,
                 props.body_object,
+                shell_isect_include_body=bool(props.shell_isect_include_body),
             )
         except ZozoHandoffError as exc:
             message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
@@ -897,6 +909,7 @@ class YOHSAI_PT_main(Panel):
         gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
         gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal GRAVITY")
         actions.operator(YOHSAI_OT_prepare_zozo.bl_idname, text="Prepare for ZOZO")
+        actions.prop(props, "shell_isect_include_body", text="Shell-isect vs Body")
         layout.separator(factor=0.5)
         _draw_status_box(layout, props)
 
