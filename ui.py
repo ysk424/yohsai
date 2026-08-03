@@ -40,6 +40,7 @@ from .mesh_loader import (
     remove_sewn_preview,
     update_clothes_mesh,
 )
+from .shell_isect_bridge import library_version
 from .zozo_handoff import ZOZO_MCP_PORT, ZozoHandoffError, prepare_for_zozo
 
 
@@ -352,6 +353,136 @@ def _set_zozo_status(message: str) -> None:
             scene.yohsai.parse_status = message
 
 
+def _fix_windows_mojibake(text: str) -> str:
+    """Repair common Windows Japanese mojibake in status / exception strings."""
+    if not text:
+        return text
+
+    def _kana_kanji(s: str) -> int:
+        return sum(
+            1 for c in s if "\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff"
+        )
+
+    def _hiragana(s: str) -> int:
+        return sum(1 for c in s if "\u3040" <= c <= "\u309f")
+
+    # Prefer UTF-8 recovery first (UTF-8 bytes misread as latin-1/cp1252).
+    # Avoid ranking raw CP932 remaps higher — they invent garbage CJK.
+    candidates: list[tuple[int, str]] = []
+    for enc_from, enc_to, weight in (
+        ("latin-1", "utf-8", 100),
+        ("cp1252", "utf-8", 100),
+        ("latin-1", "cp932", 10),
+        ("cp1252", "cp932", 10),
+    ):
+        try:
+            fixed = text.encode(enc_from, errors="strict").decode(enc_to, errors="strict")
+        except (UnicodeError, LookupError):
+            continue
+        if "\ufffd" in fixed or fixed == text:
+            continue
+        score = _kana_kanji(fixed) * weight + _hiragana(fixed) * 50
+        if score > 0:
+            candidates.append((score, fixed))
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+    # Already sensible CJK, or unrecoverable: leave as-is (except known codes).
+    if _kana_kanji(text) > 0:
+        return text
+    if "10061" in text:
+        return (
+            "WinError 10061: connection refused "
+            f"(nothing listening on ZOZO MCP port {ZOZO_MCP_PORT})"
+        )
+    return text
+
+
+def _zozo_mcp_port_from_scene(scene, default: int = ZOZO_MCP_PORT) -> int:
+    try:
+        if hasattr(scene, "zozo_contact_solver"):
+            return int(scene.zozo_contact_solver.state.mcp_port) or default
+    except Exception:
+        pass
+    return default
+
+
+def _ensure_zozo_mcp_server(
+    port: int = ZOZO_MCP_PORT, wait_s: float = 3.0
+) -> tuple[int, str]:
+    """Start ZOZO's MCP HTTP server if it is not already listening.
+
+    Uses the official Extension API (``bpy.ops.mcp.start_server`` /
+    ``start_mcp_server``), same as the N-panel Start button.
+
+    Returns ``(actual_port, status_note)``.
+    """
+    import socket
+    import time
+
+    def _port_open(p: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", int(p)), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
+    if _port_open(port):
+        return int(port), f"MCP already on :{port}"
+
+    errors: list[str] = []
+    # 1) Public operator (preferred; updates ZOZO panel state / alt port).
+    try:
+        if hasattr(bpy.ops, "mcp") and hasattr(bpy.ops.mcp, "start_server"):
+            result = bpy.ops.mcp.start_server()
+            if not (result == {"FINISHED"} or "FINISHED" in str(result)):
+                errors.append(f"mcp.start_server -> {result}")
+        else:
+            errors.append("bpy.ops.mcp.start_server unavailable")
+    except Exception as exc:
+        errors.append(f"ops: {_fix_windows_mojibake(str(exc))}")
+
+    actual = _zozo_mcp_port_from_scene(bpy.context.scene, port)
+
+    if not _port_open(actual) and not _port_open(port):
+        # 2) Direct Python API (Blender 4.2+ extension module names vary).
+        started = False
+        for mod_name in (
+            "bl_ext.user_default.ppf_contact_solver.mcp.mcp_server",
+            "ppf_contact_solver.mcp.mcp_server",
+        ):
+            try:
+                mod = __import__(
+                    mod_name, fromlist=["start_mcp_server", "is_mcp_running", "get_mcp_server"]
+                )
+                if not mod.is_mcp_running():
+                    mod.start_mcp_server(int(port))
+                server = mod.get_mcp_server()
+                if server is not None and getattr(server, "port", None):
+                    actual = int(server.port)
+                started = True
+                break
+            except Exception as exc:
+                errors.append(f"{mod_name}: {_fix_windows_mojibake(str(exc))}")
+        if not started:
+            errors.append("ZOZO MCP start API not found (is the extension enabled?)")
+
+    actual = _zozo_mcp_port_from_scene(bpy.context.scene, actual)
+    deadline = time.time() + max(0.5, float(wait_s))
+    while time.time() < deadline:
+        if _port_open(actual):
+            return actual, f"MCP started on :{actual}"
+        if actual != port and _port_open(port):
+            return int(port), f"MCP started on :{port}"
+        time.sleep(0.1)
+
+    detail = "; ".join(errors) if errors else "port did not open"
+    raise RuntimeError(
+        f"Could not start ZOZO MCP on :{port} ({detail}). "
+        "Enable ZOZO Contact Solver and use MCP Start, then Prepare again."
+    )
+
+
 def _poll_zozo_mcp() -> float | None:
     global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
     process = _zozo_process
@@ -366,9 +497,11 @@ def _poll_zozo_mcp() -> float | None:
         lines = [line for line in stdout.splitlines() if line.strip()]
         result = json.loads(lines[-1]) if lines else {}
         if process.returncode != 0 or result.get("status") != "success":
-            diagnostic = str(result.get("message") or stderr.strip() or "ZOZO MCP setup failed.")
+            diagnostic = _fix_windows_mojibake(
+                str(result.get("message") or stderr.strip() or "ZOZO MCP setup failed.")
+            )
             _set_zozo_status(
-                f"{summary}; start ZOZO MCP on :{ZOZO_MCP_PORT} and Prepare again: {diagnostic[:150]}"
+                f"{summary}; ZOZO MCP setup failed: {diagnostic[:200]}"
             )
         else:
             capture = str(result.get("capture", "not needed"))
@@ -379,8 +512,10 @@ def _poll_zozo_mcp() -> float | None:
                 "Use Transfer, then Run Simulation."
             )
     except Exception as exc:
-        diagnostic = stderr.strip() or stdout.strip() or str(exc)
-        _set_zozo_status(f"{summary}; ZOZO MCP response failed: {diagnostic[:170]}")
+        diagnostic = _fix_windows_mojibake(
+            stderr.strip() or stdout.strip() or str(exc)
+        )
+        _set_zozo_status(f"{summary}; ZOZO MCP response failed: {diagnostic[:200]}")
     finally:
         _zozo_process = None
         _zozo_scene_name = None
@@ -636,8 +771,9 @@ class YOHSAI_OT_prepare_zozo(Operator):
     bl_idname = "yohsai.prepare_zozo"
     bl_label = "Prepare for ZOZO"
     bl_description = (
-        "Build ZOZO cloth/body copies, run shell-isect check→fix→check; "
-        f"on PASS configure ZOZO MCP on port {ZOZO_MCP_PORT}. On NG, stop and report"
+        "Build ZOZO cloth/body copies, run shell-isect on cloth+body "
+        "check→fix→check; on PASS start ZOZO MCP if needed and configure "
+        f"on port {ZOZO_MCP_PORT}. On NG, stop and report"
     )
     bl_options = {"REGISTER"}
 
@@ -658,17 +794,24 @@ class YOHSAI_OT_prepare_zozo(Operator):
                 props.body_object,
             )
         except ZozoHandoffError as exc:
-            message = str(exc).strip() or type(exc).__name__
+            message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
             # Status box only — never self.report ERROR (avoids レポート:エラー).
-            props.parse_status = f"Prepare for ZOZO stopped: {message}"
+            ver = library_version()
+            suffix = f" [shell-isect {ver}]" if ver else " [shell-isect unavailable]"
+            props.parse_status = f"Prepare for ZOZO stopped: {message}{suffix}"
             return {"CANCELLED"}
         except Exception as exc:
-            message = str(exc).strip() or type(exc).__name__
-            props.parse_status = f"Prepare for ZOZO failed: {message}"
+            message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
+            ver = library_version()
+            suffix = f" [shell-isect {ver}]" if ver else " [shell-isect unavailable]"
+            props.parse_status = f"Prepare for ZOZO failed: {message}{suffix}"
             return {"CANCELLED"}
+
+        shell_suffix = f" [{prepared.shell_isect.version_suffix()}]"
 
         # shell-isect NG and other soft stops: status box only, no MCP / no report.
         if prepared.abort_message:
+            # error_report already ends with [shell-isect x.y.z]
             props.parse_status = f"Prepare for ZOZO stopped: {prepared.abort_message}"
             return {"CANCELLED"}
 
@@ -681,11 +824,15 @@ class YOHSAI_OT_prepare_zozo(Operator):
             f"Prepared {prepared.seam_count} ZOZO stitches "
             f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm)"
             + (("; " + " ".join(notes)) if notes else "")
+            + shell_suffix
         )
         try:
+            mcp_port, mcp_note = _ensure_zozo_mcp_server(ZOZO_MCP_PORT)
+            config = prepared.mcp_configuration(context.scene)
+            config["port"] = int(mcp_port)
             config_path = Path(_parser_data_dir()) / _ZOZO_CONFIG_FILENAME
             config_path.write_text(
-                json.dumps(prepared.mcp_configuration(context.scene), ensure_ascii=False, indent=2),
+                json.dumps(config, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             client_path = Path(__file__).with_name(_ZOZO_CLIENT_FILENAME)
@@ -703,13 +850,15 @@ class YOHSAI_OT_prepare_zozo(Operator):
             _zozo_scene_name = context.scene.name
             _zozo_prepared_summary = summary
             # Status box only — no operator report icon for prepare success/warnings.
-            props.parse_status = f"{summary}; configuring ZOZO MCP on :{ZOZO_MCP_PORT}..."
+            props.parse_status = (
+                f"{summary}; {mcp_note}; configuring ZOZO MCP on :{mcp_port}..."
+            )
             if not bpy.app.timers.is_registered(_poll_zozo_mcp):
                 bpy.app.timers.register(_poll_zozo_mcp, first_interval=0.2)
         except Exception as exc:
-            message = str(exc).strip() or type(exc).__name__
+            message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
             props.parse_status = (
-                f"{summary}; copies are ready, but MCP could not start: {message[:200]}"
+                f"{summary}; copies are ready, but MCP could not start: {message[:240]}"
             )
         return {"FINISHED"}
 

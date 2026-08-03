@@ -21,6 +21,13 @@ MESH_SPACING_M = 0.01
 # 5 mm global mesh (which tends to break the square-lattice solve).
 FINE_MESH_SPACING_M = 0.005
 FINE_MESH_MAX_SHORT_SIDE_M = 0.05  # 5 cm; constant knob, not a derived law
+# One-layer sewing-edge paving band (see SEAM_BOUNDARY_LAYER_DESIGN.md).
+SEAM_BAND_WIDTH_M = 0.01  # 10 mm
+VERTEX_KIND_NORMAL = 0
+VERTEX_KIND_EDGE = 1
+VERTEX_KIND_PROXIMITY = 2
+VERTEX_KIND_ATTRIBUTE = "yohsai_vertex_kind"
+SHORTENABLE_EDGE_ATTRIBUTE = "yohsai_shortenable"
 PANEL_GAP_M = 0.10
 WORLD_Y_M = -1.0
 BOTTOM_Z_M = 0.01
@@ -178,6 +185,10 @@ class PanelGeometry:
     face_quads: dict[tuple[int, ...], int]
     ring_closed: bool
     spacing_m: float = MESH_SPACING_M
+    # SEAM_BOUNDARY_LAYER_DESIGN: 0=N normal, 1=E edge, 2=P proximity.
+    vertex_kinds: list[int] | None = None
+    # Outer sewing-row edges whose rest length may absorb gather.
+    shortenable_edges: set[tuple[int, int]] | None = None
 
 
 def _point(value: object, field: str) -> Vector:
@@ -424,12 +435,63 @@ def _point_in_polygon(point: Vector, polygon: list[Vector]) -> bool:
     return inside
 
 
-def _interior_grid(polygon: list[Vector], spacing: float) -> list[Vector]:
+def _inward_vertex_normals(polygon: list[Vector]) -> list[Vector]:
+    """Unit inward normals at each vertex of a CCW polygon (pattern XY)."""
+    count = len(polygon)
+    edge_normals: list[Vector] = []
+    for index in range(count):
+        delta = polygon[(index + 1) % count] - polygon[index]
+        length = delta.length
+        if length <= 1.0e-12:
+            edge_normals.append(Vector((0.0, 0.0)))
+            continue
+        direction = delta / length
+        # CCW boundary: left normal (-dy, dx) points inside the panel.
+        edge_normals.append(Vector((-direction.y, direction.x)))
+    normals: list[Vector] = []
+    for index in range(count):
+        combined = edge_normals[(index - 1) % count] + edge_normals[index]
+        if combined.length_squared <= 1.0e-20:
+            fallback = edge_normals[index]
+            if fallback.length_squared <= 1.0e-20:
+                fallback = edge_normals[(index - 1) % count]
+            if fallback.length_squared <= 1.0e-20:
+                normals.append(Vector((0.0, 1.0)))
+            else:
+                normals.append(fallback.normalized())
+        else:
+            normals.append(combined.normalized())
+    return normals
+
+
+def _offset_inside(
+    polygon: list[Vector], index: int, normal: Vector, width: float
+) -> Vector | None:
+    """Return a point roughly ``width`` inward of ``polygon[index]``, or None."""
+    origin = polygon[index]
+    if normal.length_squared <= 1.0e-20 or width <= 0.0:
+        return None
+    unit = normal.normalized()
+    for scale in (1.0, 0.85, 0.7, 0.55, 0.4, 0.25):
+        candidate = origin + unit * (width * scale)
+        if _point_in_polygon(candidate, polygon):
+            return candidate
+    return None
+
+
+def _interior_grid(
+    polygon: list[Vector],
+    spacing: float,
+    *,
+    exclude_segments: list[tuple[Vector, Vector]] | None = None,
+    exclude_distance: float = 0.0,
+) -> list[Vector]:
     min_x = min(point.x for point in polygon)
     max_x = max(point.x for point in polygon)
     min_y = min(point.y for point in polygon)
     max_y = max(point.y for point in polygon)
     margin = spacing * 0.12
+    band_clearance = max(0.0, exclude_distance) + margin
     result: list[Vector] = []
     # Pattern-page coordinates are the material frame.  Sampling integer
     # multiples of the pitch (rather than panel-local offsets) keeps every
@@ -444,11 +506,20 @@ def _interior_grid(polygon: list[Vector], spacing: float) -> list[Vector]:
         for grid_x in range(first_x, last_x + 1):
             x = grid_x * spacing
             point = Vector((x, y))
-            if _point_in_polygon(point, polygon) and min(
+            if not _point_in_polygon(point, polygon):
+                continue
+            if min(
                 _point_segment_distance(point, polygon[index], polygon[(index + 1) % len(polygon)])
                 for index in range(len(polygon))
-            ) > margin:
-                result.append(point)
+            ) <= margin:
+                continue
+            if exclude_segments and band_clearance > 0.0:
+                if min(
+                    _point_segment_distance(point, start, end)
+                    for start, end in exclude_segments
+                ) <= band_clearance:
+                    continue
+            result.append(point)
     return result
 
 
@@ -682,9 +753,12 @@ def _weld_ring(
     edges: list[tuple[int, int]],
     faces: list[tuple[int, ...]],
     edge_meta: dict[tuple[int, int], EdgeMeta],
+    vertex_kinds: list[int] | None = None,
+    shortenable_edges: set[tuple[int, int]] | None = None,
 ) -> tuple[
     list[Vector], list[Vector], list[tuple[int, int]], list[tuple[int, ...]],
-    dict[tuple[int, int], EdgeMeta], dict[tuple[int, int], float]
+    dict[tuple[int, int], EdgeMeta], dict[tuple[int, int], float],
+    list[int], set[tuple[int, int]],
 ]:
     chains = _marked_edge_chains(edges, edge_meta, "ring")
     if len(chains) != 2 or len(chains[0]) != len(chains[1]):
@@ -739,7 +813,37 @@ def _weld_ring(
         if meta.sewing_group or meta.fold:
             new_meta[key] = meta
     new_rest = {key: sum(values) / len(values) for key, values in rest_values.items()}
-    return new_pattern, new_construction, sorted(rest_values), new_faces, new_meta, new_rest
+
+    kinds_src = vertex_kinds if vertex_kinds is not None else [VERTEX_KIND_NORMAL] * len(pattern_vertices)
+    new_kinds = [VERTEX_KIND_NORMAL] * len(kept)
+    for old in kept:
+        kind = VERTEX_KIND_NORMAL
+        for member in groups[old]:
+            member_kind = kinds_src[member] if member < len(kinds_src) else VERTEX_KIND_NORMAL
+            # Prefer edge over proximity over normal when welding merges kinds.
+            if member_kind == VERTEX_KIND_EDGE or (
+                member_kind == VERTEX_KIND_PROXIMITY and kind == VERTEX_KIND_NORMAL
+            ):
+                kind = member_kind
+        new_kinds[new_index[old]] = kind
+
+    new_shortenable: set[tuple[int, int]] = set()
+    if shortenable_edges:
+        for a, b in shortenable_edges:
+            key = _edge_key(remap_vertex(a), remap_vertex(b))
+            if key[0] != key[1]:
+                new_shortenable.add(key)
+
+    return (
+        new_pattern,
+        new_construction,
+        sorted(rest_values),
+        new_faces,
+        new_meta,
+        new_rest,
+        new_kinds,
+        new_shortenable,
+    )
 
 
 def _triangulate_panel(
@@ -750,55 +854,151 @@ def _triangulate_panel(
     if len(outline) < 3 or abs(_signed_area(outline)) <= 1.0e-12:
         raise MeshLoadError(f"Panel {panel_id!r} has a degenerate expanded outline.")
 
+    outline_count = len(outline)
+    sewing_edge_flags = [bool(meta.sewing_group) for meta in outline_meta]
+    sewing_vertex_flags = [
+        sewing_edge_flags[(index - 1) % outline_count] or sewing_edge_flags[index]
+        for index in range(outline_count)
+    ]
+    has_sewing = any(sewing_edge_flags)
+
     input_vertices = [point.copy() for point in outline]
-    input_edges = [(index, (index + 1) % len(outline)) for index in range(len(outline))]
+    # Per input-vertex role before CDT (outline indices 0..outline_count-1).
+    input_vertex_role = [
+        VERTEX_KIND_EDGE if sewing_vertex_flags[index] else VERTEX_KIND_NORMAL
+        for index in range(outline_count)
+    ]
+    input_edges = [(index, (index + 1) % outline_count) for index in range(outline_count)]
     input_meta = list(outline_meta)
+    # Input edge index -> shortenable (outer sewing row only).
+    input_shortenable = list(sewing_edge_flags)
+
+    # One-layer paving: proximity companions for sewing-related outline verts.
+    prox_of_outline: dict[int, int] = {}
+    if has_sewing and SEAM_BAND_WIDTH_M > 0.0:
+        normals = _inward_vertex_normals(outline)
+        for index in range(outline_count):
+            if not sewing_vertex_flags[index]:
+                continue
+            offset = _offset_inside(outline, index, normals[index], SEAM_BAND_WIDTH_M)
+            if offset is None:
+                continue
+            prox_of_outline[index] = len(input_vertices)
+            input_vertices.append(offset)
+            input_vertex_role.append(VERTEX_KIND_PROXIMITY)
+        for index in range(outline_count):
+            prox_index = prox_of_outline.get(index)
+            if prox_index is None:
+                continue
+            # Width spoke E–P (not shortenable).
+            input_edges.append((index, prox_index))
+            input_meta.append(EdgeMeta(None, False, False))
+            input_shortenable.append(False)
+        for index in range(outline_count):
+            next_index = (index + 1) % outline_count
+            if not sewing_edge_flags[index]:
+                continue
+            prox_a = prox_of_outline.get(index)
+            prox_b = prox_of_outline.get(next_index)
+            if prox_a is None or prox_b is None:
+                continue
+            # Inner P–P row (not shortenable; keeps band topology).
+            input_edges.append((prox_a, prox_b))
+            input_meta.append(EdgeMeta(None, False, False))
+            input_shortenable.append(False)
+
     if fold_points:
         fold_indices = [_find_vertex(input_vertices, fold_points[0])]
         for point in fold_points[1:-1]:
             fold_indices.append(len(input_vertices))
             input_vertices.append(point.copy())
+            input_vertex_role.append(VERTEX_KIND_NORMAL)
         fold_indices.append(_find_vertex(input_vertices, fold_points[-1]))
         for start, end in zip(fold_indices, fold_indices[1:]):
             input_edges.append((start, end))
             input_meta.append(EdgeMeta(None, True, False))
+            input_shortenable.append(False)
 
-    grid_points = _interior_grid(outline, spacing)
-    input_vertices.extend(grid_points)
+    sewing_segments = [
+        (outline[index], outline[(index + 1) % outline_count])
+        for index, flag in enumerate(sewing_edge_flags)
+        if flag
+    ]
+    grid_points = _interior_grid(
+        outline,
+        spacing,
+        exclude_segments=sewing_segments or None,
+        exclude_distance=SEAM_BAND_WIDTH_M if sewing_segments else 0.0,
+    )
+    for point in grid_points:
+        input_vertices.append(point)
+        input_vertex_role.append(VERTEX_KIND_NORMAL)
+
     try:
         output = delaunay_2d_cdt(
             input_vertices,
             input_edges,
-            [list(range(len(outline)))],
+            [list(range(outline_count))],
             1,
             1.0e-9,
             True,
         )
     except Exception as exc:
         raise MeshLoadError(f"Panel {panel_id!r} triangulation failed: {exc}") from exc
-    vertices, edges, faces, _orig_vertices, original_edges, _original_faces = output
+    vertices, edges, faces, orig_vertices, original_edges, _original_faces = output
     if any(len(face) != 3 for face in faces):
         raise MeshLoadError(f"Panel {panel_id!r} triangulation produced a non-triangular proxy face.")
     triangles = [tuple(face) for face in faces]
     if not triangles:
         raise MeshLoadError(f"Panel {panel_id!r} triangulation produced no faces.")
 
+    def _as_index_list(value: object) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, int):
+            return [value]
+        try:
+            return [int(item) for item in value]
+        except TypeError:
+            return []
+
+    # Map CDT output vertices back to E / P / N (prefer E > P > N on merges).
+    vertex_kinds = [VERTEX_KIND_NORMAL] * len(vertices)
+    for output_index, sources in enumerate(orig_vertices):
+        kind = VERTEX_KIND_NORMAL
+        for source in _as_index_list(sources):
+            if not (0 <= source < len(input_vertex_role)):
+                continue
+            source_kind = input_vertex_role[source]
+            if source_kind == VERTEX_KIND_EDGE or (
+                source_kind == VERTEX_KIND_PROXIMITY and kind == VERTEX_KIND_NORMAL
+            ):
+                kind = source_kind
+        vertex_kinds[output_index] = kind
+
     edge_meta: dict[tuple[int, int], EdgeMeta] = {}
+    shortenable_edges: set[tuple[int, int]] = set()
     for edge, origins in zip(edges, original_edges):
         labels: set[str] = set()
         fold = False
         ring = False
-        for origin in origins:
+        shortenable = False
+        for origin in _as_index_list(origins):
             if 0 <= origin < len(input_meta):
                 meta = input_meta[origin]
                 if meta.sewing_group:
                     labels.add(meta.sewing_group)
                 fold = fold or meta.fold
                 ring = ring or meta.ring
+                if origin < len(input_shortenable) and input_shortenable[origin]:
+                    shortenable = True
         if len(labels) > 1:
             raise MeshLoadError(f"Panel {panel_id!r} triangulation merged conflicting sewing edges.")
+        key = _edge_key(*edge)
         if labels or fold or ring:
-            edge_meta[_edge_key(*edge)] = EdgeMeta(next(iter(labels), None), fold, ring)
+            edge_meta[key] = EdgeMeta(next(iter(labels), None), fold, ring)
+        if shortenable:
+            shortenable_edges.add(key)
 
     update_label = panel.get("label")
     if update_label is not None and (not isinstance(update_label, str) or not update_label):
@@ -820,7 +1020,17 @@ def _triangulate_panel(
             result_faces,
             edge_meta,
             edge_rest,
-        ) = _weld_ring(pattern_vertices, construction_vertices, result_edges, result_faces, edge_meta)
+            vertex_kinds,
+            shortenable_edges,
+        ) = _weld_ring(
+            pattern_vertices,
+            construction_vertices,
+            result_edges,
+            result_faces,
+            edge_meta,
+            vertex_kinds,
+            shortenable_edges,
+        )
         for face in result_faces:
             a, b, c = (construction_vertices[index] for index in face[:3])
             normal = (b - a).cross(c - a)
@@ -852,6 +1062,9 @@ def _triangulate_panel(
         quads = [(bottom_right, bottom_left, top_left, top_right) for bottom_left, bottom_right, top_right, top_left in quads]
         result_faces = [tuple(reversed(face)) for face in result_faces]
 
+    if len(vertex_kinds) != len(pattern_vertices):
+        vertex_kinds = [VERTEX_KIND_NORMAL] * len(pattern_vertices)
+
     base_instance = str(update_label or panel_id)
     instance_id = f"{base_instance}:{mirror_side}" if mirror_side else base_instance
     return PanelGeometry(
@@ -871,6 +1084,8 @@ def _triangulate_panel(
         face_quads=face_quads,
         ring_closed=ring_closed,
         spacing_m=spacing,
+        vertex_kinds=list(vertex_kinds),
+        shortenable_edges=set(shortenable_edges),
     )
 
 
@@ -978,6 +1193,21 @@ def _write_panel_mesh_attributes(
     for item, point in zip(construction_attribute.data, panel.construction_vertices):
         item.vector = point
 
+    kinds = panel.vertex_kinds
+    if kinds is None or len(kinds) != len(mesh.vertices):
+        kinds = [VERTEX_KIND_NORMAL] * len(mesh.vertices)
+    kind_attribute = mesh.attributes.new(name=VERTEX_KIND_ATTRIBUTE, type="INT", domain="POINT")
+    for item, kind in zip(kind_attribute.data, kinds):
+        item.value = int(kind)
+
+    shortenable = panel.shortenable_edges or set()
+    shortenable_attribute = mesh.attributes.new(
+        name=SHORTENABLE_EDGE_ATTRIBUTE, type="BOOLEAN", domain="EDGE"
+    )
+    for edge in mesh.edges:
+        key = _edge_key(*edge.vertices)
+        shortenable_attribute.data[edge.index].value = key in shortenable
+
 
 def _sewing_signature(document: dict[str, Any]) -> str:
     groups = document.get("sewing_groups")
@@ -1061,6 +1291,7 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
             obj["yohsai_collection"] = name
             obj["yohsai_source_svg"] = str(source.get("svg_path", ""))
             obj["yohsai_mesh_spacing_m"] = panel.spacing_m
+            obj["yohsai_seam_band_width_m"] = SEAM_BAND_WIDTH_M
             obj["yohsai_panel_id"] = panel.panel_id
             obj["yohsai_panel_label"] = panel.update_label or ""
             obj["yohsai_panel_instance"] = panel.instance_id
@@ -1260,6 +1491,7 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
         obj.data = mesh
         obj["yohsai_source_svg"] = new_source
         obj["yohsai_mesh_spacing_m"] = panel.spacing_m
+        obj["yohsai_seam_band_width_m"] = SEAM_BAND_WIDTH_M
         obj["yohsai_panel_id"] = panel.panel_id
         obj["yohsai_panel_label"] = panel.update_label
         obj["yohsai_panel_instance"] = panel.instance_id
@@ -1929,6 +2161,7 @@ def remesh_with_seam_counts(
         old_meshes.append(obj.data)
         obj.data = mesh
         obj["yohsai_mesh_spacing_m"] = panel.spacing_m
+        obj["yohsai_seam_band_width_m"] = SEAM_BAND_WIDTH_M
         changed.add(obj.name)
     if changed:
         remove_sewn_preview(collection)

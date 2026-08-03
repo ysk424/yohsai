@@ -37,10 +37,12 @@ non-empty.
 
 ## Still true
 
-ppf's exact Transfer-time predicates remain the final ground truth. Yohsai's
-float BVH tests can clear while Transfer still rejects (or the reverse on rare
-near-touches). A Transfer rejection after a clean Prepare is still a real
-defect to chase with that mesh in hand.
+ppf's exact Transfer-time predicates remain the final ground truth. From
+**0.10.4-rtx**, Prepare's shell-isect twin runs on **cloth + body** (STATIC
+collider faces), matching `fixed_scene_assemble`'s combined self-intersection
+pass for cloth–cloth and cloth–body pairs. Cloth-only float BVH unfold remains
+approximate; a Transfer rejection after a clean Prepare is still a real defect
+to chase with that mesh in hand.
 
 ## Not a defect, recorded to prevent a wrong assumption
 

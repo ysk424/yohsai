@@ -83,7 +83,8 @@ ysc_config default_config() {
     config.iterations = 16;
     // Constant kinematic closure per substep (metres). Larger values sew
     // panels shut faster; capture still finishes the last 2 mm.
-    config.seam_attraction_step = 0.016F;
+    // 28 mm/substep keeps shoulder/long seams strong (do not weaken for contact).
+    config.seam_attraction_step = 0.028F;
     config.seam_capture_distance = 0.002F;
     config.stretch_relaxation = 1.0F;
     config.shear_relaxation = 0.02F;
@@ -897,21 +898,43 @@ void Solver::project_body_contacts_external(const int32_t* candidates, int32_t c
         if (signed_distance < config_.contact_thickness) {
             contact_corrections_[static_cast<size_t>(vertex_index)] +=
                 normal * (config_.contact_thickness - signed_distance);
+            // Stash the most negative signed distance in the count channel's
+            // companion: reuse correction_counts as a hit counter only; the
+            // penetration decision is re-evaluated from the averaged vector
+            // length vs thickness below is not needed — apply full vs capped
+            // using the mean correction direction after averaging.
             ++contact_correction_counts_[static_cast<size_t>(vertex_index)];
+            // Track whether any contributing sample was penetrating via the
+            // high bit of the count (counts stay small; safe for int32).
+            if (signed_distance < 0.0F) {
+                contact_correction_counts_[static_cast<size_t>(vertex_index)] |=
+                    static_cast<int32_t>(1u << 30);
+            }
         }
     }
     const int32_t vertex_count = static_cast<int32_t>(vertices_.size());
+    constexpr int32_t kPenetratingBit = static_cast<int32_t>(1u << 30);
 #if defined(_OPENMP)
 #  pragma omp parallel for schedule(static)
 #endif
     for (int32_t index = 0; index < vertex_count; ++index) {
-        if (contact_correction_counts_[static_cast<size_t>(index)] <= 0) {
+        int32_t packed = contact_correction_counts_[static_cast<size_t>(index)];
+        if (packed == 0) {
+            continue;
+        }
+        const bool penetrating = (packed & kPenetratingBit) != 0;
+        const int32_t hits = packed & ~kPenetratingBit;
+        if (hits <= 0) {
             continue;
         }
         Vec3 correction =
-            contact_corrections_[static_cast<size_t>(index)] /
-            static_cast<float>(contact_correction_counts_[static_cast<size_t>(index)]);
-        correction = clamp_length(correction, config_.maximum_position_correction * 0.04F);
+            contact_corrections_[static_cast<size_t>(index)] / static_cast<float>(hits);
+        // Penetrating: project fully to the thickness shell (no soft cap).
+        // Outside but inside the shell: allow up to contact_thickness per pass
+        // (was max_pos*0.04 ≈ 0.2 mm — too weak against seams).
+        if (!penetrating) {
+            correction = clamp_length(correction, config_.contact_thickness);
+        }
         vertices_[static_cast<size_t>(index)].position += correction;
     }
 }
@@ -1003,7 +1026,12 @@ void Solver::project_body_contacts_auto(bool gather) {
         const float signed_distance = dot(vertex.position - closest, normal);
         if (signed_distance < config_.contact_thickness) {
             Vec3 correction = normal * (config_.contact_thickness - signed_distance);
-            correction = clamp_length(correction, config_.maximum_position_correction * 0.04F);
+            // Penetrating (inside the body): full jump to the thickness shell.
+            // Outside but still inside the shell: strong cap = thickness (5 mm),
+            // not the old max_pos*0.04 ≈ 0.2 mm which lost to seam drag.
+            if (signed_distance >= 0.0F) {
+                correction = clamp_length(correction, config_.contact_thickness);
+            }
             vertex.position += correction;
             contact_correction_counts_[static_cast<size_t>(index)] = 1;
         }

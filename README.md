@@ -130,15 +130,20 @@ restarting Blender is unsupported.
 `Prepare for ZOZO` is available after at least one completed GRAVITY step. It
 does not modify, join, rename, hide, or move the source Yohsai parts. Pipeline:
 
-1. Build internal ZOZO cloth / body copies (stitch opening, approximate unfold).
-2. **shell-isect check** (ZOZO-twin self-intersection detector).
-3. **shell-isect fix** (local-only repair; may be a no-op until the DLL grows cases).
-4. **shell-isect check** again.
-5. **NG** — write the error (pair counts + face-pair indices) to the status line,
-   keep the copies for inspection, **do not** configure ZOZO. Settle with
-   Normal or Zero GRAVITY and press Prepare again.
-6. **PASS** (zero pairs) — configure ZOZO Contact Solver over MCP and leave the
-   hand-off ready for Transfer / Run.
+1. Build internal ZOZO **cloth** copy (stitch opening, approximate unfold).
+2. Build internal ZOZO **body** copy (required before twin-check).
+3. **shell-isect check** on **cloth + body** (ZOZO-twin: cloth–cloth and
+   cloth–body pairs; body–body collider pairs skipped, same as Transfer).
+4. **local fix** (NG cloth verts only: push outside body / small cloth–cloth
+   separation; topology and body unchanged; rollback if pair count rises).
+5. **shell-isect check** again on cloth + body.
+6. **NG** — write the error (pair counts + face-pair indices + shell-isect
+   version) to the status line, keep cloth/body copies for inspection,
+   **do not** configure ZOZO. Settle with Normal or Zero GRAVITY and press
+   Prepare again.
+7. **PASS** (zero pairs) — configure ZOZO Contact Solver over MCP and leave the
+   hand-off ready for Transfer / Run. Status messages end with
+   `[shell-isect x.y.z]`.
 
 ZOZO cannot start with two contact surfaces exactly coincident. On the copy
 only, each loose stitch is opened to at least 2.21 mm: 1.1 times the two 1 mm

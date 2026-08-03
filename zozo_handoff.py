@@ -690,6 +690,14 @@ def prepare_for_zozo(
         _remove_object_and_owned_mesh(cloth)
         raise
 
+    # Body copy is required before shell-isect: Transfer checks cloth+STATIC body
+    # as one mesh (collider × collider skipped). Twin detection must see body.
+    try:
+        body_copy = _create_body_object(handoff, collection, body)
+    except Exception:
+        _remove_object_and_owned_mesh(cloth)
+        raise
+
     for selected in context.selected_objects:
         selected.select_set(False)
     cloth.select_set(True)
@@ -699,15 +707,17 @@ def prepare_for_zozo(
     cloth_group_name = f"Yohsai {collection.name} Cloth"
     body_group_name = f"Yohsai {collection.name} Body"
     cloth["yohsai_zozo_group"] = cloth_group_name
+    body_copy["yohsai_zozo_group"] = body_group_name
 
-    # shell-isect pipeline (PROCEDURE): cloth mesh → check → fix → check.
-    # PASS (pairs == 0): create ZOZO body, then MCP.
-    # NG: report face pairs, keep cloth for inspection, no body export / no MCP.
-    shell_report = run_check_and_fix(cloth)
+    # shell-isect pipeline (PROCEDURE): cloth+body → check → fix → check.
+    # PASS (pairs == 0): MCP. NG: report face pairs, keep copies, no MCP.
+    shell_report = run_check_and_fix(cloth, body_copy)
     cloth["yohsai_shell_isect"] = shell_report.summary()
+    cloth["yohsai_shell_isect_version"] = shell_report.version
     cloth["yohsai_shell_isect_pairs_before"] = int(shell_report.pairs_before)
     cloth["yohsai_shell_isect_pairs_after"] = int(shell_report.pairs_after)
     cloth["yohsai_shell_isect_fix"] = shell_report.fix_status
+    cloth["yohsai_shell_isect_cloth_faces"] = int(shell_report.n_cloth_faces)
     if shell_report.pairs:
         cloth["yohsai_shell_isect_face_pairs"] = [
             f"{a},{b}" for a, b in shell_report.pairs
@@ -719,10 +729,11 @@ def prepare_for_zozo(
         cloth["yohsai_self_intersect_warning"] = True
         # Do not raise: Blender surfaces uncaught/mismatched exceptions as
         # レポート:エラー. Soft-abort keeps the message in the status box only.
+        # Body copy stays for inspection (cloth–body pairs need both meshes).
         return ZozoPreparation(
             collection=handoff,
             cloth_object=cloth,
-            body_object=None,
+            body_object=body_copy,
             seam_count=len(seams),
             maximum_input_seam_distance_m=maximum_before,
             minimum_output_seam_distance_m=minimum_after,
@@ -733,14 +744,6 @@ def prepare_for_zozo(
             shell_isect=shell_report,
             abort_message=shell_report.error_report(),
         )
-
-    # Body export only after shell-isect PASS.
-    try:
-        body_copy = _create_body_object(handoff, collection, body)
-    except Exception:
-        _remove_object_and_owned_mesh(cloth)
-        raise
-    body_copy["yohsai_zozo_group"] = body_group_name
 
     cloth["yohsai_self_intersect_warning"] = not intersection.resolved
 

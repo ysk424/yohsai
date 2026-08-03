@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.10.3-rtx"
+version = "0.10.8-rtx"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -40,6 +40,7 @@ paths = [
     "KITSUKE_DESIGN.md",
     "SOLVER_DESIGN.md",
     "GRAINLINE_DESIGN.md",
+    "SEAM_BOUNDARY_LAYER_DESIGN.md",
     "PPF_OPEN_ISSUES.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",

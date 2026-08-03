@@ -152,7 +152,7 @@ Self-contact is absent.
 - substeps per click: 8;
 - gravity per click: either 0 or 9.81 m/s² in world -Z;
 - material/contact iterations: 16 for Normal GRAVITY, 24 (1.5x) for Zero GRAVITY;
-- seam closure: 16 mm per substep, applied once as a position change;
+- seam closure: 28 mm per substep, applied once as a position change;
 - seam capture distance: 2 mm;
 - edge stretch relaxation per sweep: 1.0, with two alternating sweeps;
 - crimp reserve before an edge becomes a hard wall: 5% of rest length;
@@ -161,6 +161,8 @@ Self-contact is absent.
 - maximum position correction per projection: 5 mm;
 - Body candidate radius: 40 mm;
 - Body contact thickness: 5 mm;
+- Body contact on penetration: full projection to the thickness shell (no soft
+  cap); outside but inside the shell: up to 5 mm per contact pass (was ~0.2 mm);
 - Body contact frequency: every other material iteration, and always the last.
 
 Every value above is `ysc_default_config()` in `native/src/solver.cpp`, except

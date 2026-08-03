@@ -17,6 +17,13 @@ Stored attributes include `yohsai_pattern_position`,
 `yohsai_grainline_family`, `yohsai_grainline_quad`, sewing membership, and fold
 membership. Edge-family values remain proxy, warp, weft, and transition.
 
+Sewing-related free edges also carry a one-layer **10 mm paving band**
+(`SEAM_BAND_WIDTH_M`): outer row vertices are kind **E**, the inward companion
+row is kind **P**, and the grain interior is kind **N**
+(`yohsai_vertex_kind`). Outer sewing-row edges are marked
+`yohsai_shortenable` for future gather absorption. See
+`SEAM_BOUNDARY_LAYER_DESIGN.md`.
+
 Kitsuke reads non-proxy edge rest lengths for warp/weft stretch, groups the two
 proxy triangles back into one square for shear, and derives straight axial
 triples for weak bending. The proxy diagonal itself carries no material force.

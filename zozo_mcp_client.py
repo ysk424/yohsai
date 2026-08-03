@@ -23,6 +23,69 @@ import urllib.request
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
 
+def _fix_windows_mojibake(text: str) -> str:
+    """Repair common Windows Japanese mojibake in exception strings."""
+    if not text:
+        return text
+
+    def _kana_kanji(s: str) -> int:
+        return sum(
+            1 for c in s if "\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff"
+        )
+
+    def _hiragana(s: str) -> int:
+        return sum(1 for c in s if "\u3040" <= c <= "\u309f")
+
+    candidates: list[tuple[int, str]] = []
+    for enc_from, enc_to, weight in (
+        ("latin-1", "utf-8", 100),
+        ("cp1252", "utf-8", 100),
+        ("latin-1", "cp932", 10),
+        ("cp1252", "cp932", 10),
+    ):
+        try:
+            fixed = text.encode(enc_from, errors="strict").decode(enc_to, errors="strict")
+        except (UnicodeError, LookupError):
+            continue
+        if "\ufffd" in fixed or fixed == text:
+            continue
+        score = _kana_kanji(fixed) * weight + _hiragana(fixed) * 50
+        if score > 0:
+            candidates.append((score, fixed))
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+    if _kana_kanji(text) > 0:
+        return text
+    if "10061" in text:
+        return (
+            "WinError 10061: connection refused "
+            "(ZOZO MCP is not listening; start it from the ZOZO panel or Yohsai Prepare)"
+        )
+    return text
+
+
+def _format_exception(exc: BaseException) -> str:
+    """Stable, readable message for JSON status (no mojibake)."""
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, OSError):
+            winerr = getattr(reason, "winerror", None)
+            if winerr == 10061 or getattr(reason, "errno", None) in (111, 61):
+                return (
+                    "ZOZO MCP connection refused (nothing listening on the MCP port). "
+                    "Start MCP in ZOZO Contact Solver, or re-run Prepare after the add-on loads."
+                )
+            return _fix_windows_mojibake(f"{type(reason).__name__}: {reason}")
+        return _fix_windows_mojibake(str(exc))
+    if isinstance(exc, OSError):
+        winerr = getattr(exc, "winerror", None)
+        if winerr == 10061 or getattr(exc, "errno", None) in (111, 61):
+            return "ZOZO MCP connection refused (WinError 10061 / nothing listening)"
+        return _fix_windows_mojibake(f"{type(exc).__name__}: {exc}")
+    return _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
+
+
 class MCPClient:
     def __init__(self, port: int, timeout: float = 15.0):
         self.url = f"http://localhost:{port}/mcp"
@@ -398,7 +461,7 @@ def main() -> int:
     except Exception as exc:
         result = {
             "status": "error",
-            "message": str(exc).strip() or type(exc).__name__,
+            "message": _format_exception(exc),
             "exception": type(exc).__name__,
         }
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
