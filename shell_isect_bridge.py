@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Bridge to shell-isect (ZOZO-twin check + local-only fix).
 
-Yohsai pins shell-isect **0.10.x**. Read shell-isect PROCEDURE.md before
-changing how this module calls the DLL.
+Yohsai pins shell-isect **0.10+** (ships **0.11.x** with real local-fix).
+Read shell-isect PROCEDURE.md before changing how this module calls the DLL.
 
-Host pipeline for Prepare for ZOZO:
+Host pipeline for Prepare for ZOZO (strict stages):
 
-  build cloth + body copies → check → optional local fix → check
-  → PASS (pairs == 0): continue ZOZO MCP
-  → NG: report error kind + face-pair indices; stop (no MCP)
+  build cloth + body copies
+  → **CHECK 1**  (shell_isect_check — detect only)
+  → **FIX**      (DLL fix and/or host local push — geometry only)
+  → **CHECK 2**  (shell_isect_check again — detect only; gate for MCP)
+  → PASS (check2 pairs == 0): continue ZOZO MCP
+  → NG: report check1 | fix | check2 + face-pair indices; stop (no MCP)
+
+When CHECK 1 is already clean, FIX is skipped and CHECK 2 is not required
+(report still records check1 = check2 = 0). When CHECK 1 finds pairs, FIX
+always runs and CHECK 2 always runs afterward — even if FIX is NOOP — so
+debug always sees two independent checker results around the fix.
 
 **Default (practical):** cloth-only shell-isect (``include_body=False``).
 High-poly CC bodies make cloth+body twin checks take many minutes; the body
@@ -52,21 +60,28 @@ _LOCAL_CLOTH_SEPARATION_M = 0.0008
 class ShellIsectReport:
     available: bool
     version: str
+    # CHECK 1 pair count (before FIX). -1 = checker error / unavailable.
     pairs_before: int
+    # CHECK 2 pair count (after FIX). Same as pairs_before when FIX was skipped
+    # because CHECK 1 was already clean.
     pairs_after: int
     fix_status: str
     message: str
-    # Face-index pairs from the *final* check (after fix), i < j.
+    # Face-index pairs from CHECK 2 (or CHECK 1 when clean / pre-fix fail).
     # When body is included, indices are on the combined mesh (cloth faces
     # first: 0 .. n_cloth_faces-1, then body).
     pairs: tuple[tuple[int, int], ...] = ()
     n_cloth_faces: int = 0
     # False = cloth-only (default, fast). True = cloth+body ZOZO twin (slow).
     include_body: bool = False
+    # How many independent checker stages ran (1 = clean early exit, 2 = full).
+    checks_run: int = 0
+    # True when the full check→fix→check path ran (CHECK 1 found pairs).
+    fix_attempted: bool = False
 
     @property
     def passed(self) -> bool:
-        """True only when the active check ends with zero pairs."""
+        """True only when the final checker stage ends with zero pairs."""
         return self.available and self.pairs_after == 0 and self.pairs_before >= 0
 
     def version_suffix(self) -> str:
@@ -76,14 +91,22 @@ class ShellIsectReport:
             return f"shell-isect {self.version} {mode}"
         return f"shell-isect unavailable {mode}"
 
+    def pipeline_token(self) -> str:
+        """Short stage summary for status / custom properties."""
+        if not self.available:
+            return "unavailable"
+        if self.checks_run <= 1 and self.pairs_before == 0:
+            return "check1=0 (clean; fix skipped)"
+        return (
+            f"check1={self.pairs_before} fix={self.fix_status} "
+            f"check2={self.pairs_after}"
+        )
+
     def summary(self) -> str:
         if not self.available:
             return f"shell-isect: {self.message}"
         mode = "cloth+body" if self.include_body else "cloth-only"
-        return (
-            f"shell-isect {self.version} ({mode}): pairs "
-            f"{self.pairs_before}->{self.pairs_after} fix={self.fix_status}"
-        )
+        return f"shell-isect {self.version} ({mode}): {self.pipeline_token()}"
 
     def _format_face(self, index: int) -> str:
         n = self.n_cloth_faces
@@ -103,10 +126,10 @@ class ShellIsectReport:
                 f"ERROR: self-intersection check failed ({self.message}) "
                 f"[{self.version_suffix()}]"
             )
-        # e.g. ERROR: self-intersection (tri-tri face pairs): pairs 1->1 fix=NOOP face_pairs: (c12,b3)
+        # e.g. ERROR: self-intersection check1=1 fix=NOOP check2=1 face_pairs: ...
         text = (
             "ERROR: self-intersection (tri-tri face pairs): "
-            f"pairs {self.pairs_before}->{self.pairs_after} fix={self.fix_status}"
+            f"{self.pipeline_token()}"
         )
         if self.n_cloth_faces > 0:
             text += f" cloth_faces=0..{self.n_cloth_faces - 1}"
@@ -497,14 +520,18 @@ def _local_fix_cloth_against_body(
     n_cloth_faces: int,
     pairs: tuple[tuple[int, int], ...],
     pairs_before: int,
-) -> tuple[np.ndarray, int, tuple[tuple[int, int], ...], str, str]:
-    """Local-only NG pocket fix: push cloth verts, never body; re-check; rollback if worse.
+) -> tuple[str, str]:
+    """Local-only NG pocket fix: push cloth verts, never body.
 
-    Returns (final_cloth_verts, pairs_after, pairs, fix_status, message).
+    Multi-pass guidance may call the checker *inside* the fix loop to decide
+    whether a trial step helped (algorithm detail). That is not CHECK 2 — the
+    caller always runs an independent post-fix checker on the written mesh.
+
+    Returns (fix_status, message). Writes cloth when geometry changes.
     """
     body_bvh = _body_bvh_world(body)
     if body_bvh is None:
-        return cloth_verts, pairs_before, pairs, "NOOP", "no body triangles"
+        return "NOOP", "no body triangles"
 
     adjacency = _cloth_adjacency(cloth_faces, int(cloth_verts.shape[0]))
     working = cloth_verts.copy()
@@ -551,7 +578,7 @@ def _local_fix_cloth_against_body(
         if moved_body == 0 and moved_sep == 0:
             break
 
-        # Build combined mesh from trial cloth verts (body unchanged).
+        # Guidance probe only (not the host CHECK 2 gate).
         b_verts, b_faces = _mesh_arrays_world(body)
         n_cloth_verts = int(trial.shape[0])
         comb_verts = np.ascontiguousarray(np.vstack([trial, b_verts]), dtype=np.float64)
@@ -565,7 +592,6 @@ def _local_fix_cloth_against_body(
                 np.ones((b_faces.shape[0],), dtype=np.uint8),
             ]
         )
-        # Full filtered count is returned even when the pair buffer is capped.
         after_count, after_pairs, rc = _check_pairs(
             lib,
             comb_verts,
@@ -574,19 +600,17 @@ def _local_fix_cloth_against_body(
             is_collider=is_collider,
         )
         if rc not in (0, 2):
+            if applied_any:
+                _apply_world_verts(cloth, working)
             return (
-                working,
-                current_count,
-                current_pairs,
-                "FAILED",
-                f"re-check failed rc={rc}",
+                "FAILED" if not applied_any else "APPLIED",
+                f"fix guidance re-check failed rc={rc}",
             )
         if after_count > current_count:
             # Rollback this step; do not ship a worse mesh.
+            if applied_any:
+                _apply_world_verts(cloth, working)
             return (
-                working,
-                current_count,
-                current_pairs,
                 "APPLIED" if applied_any else "FAILED",
                 "local push increased pairs; rolled back step",
             )
@@ -597,20 +621,74 @@ def _local_fix_cloth_against_body(
         current_pairs = after_pairs
         if after_count == 0:
             _apply_world_verts(cloth, working)
-            return working, 0, (), "CLEARED", "local body push cleared pairs"
+            return "CLEARED", "local body push cleared pairs"
 
         clearance += _LOCAL_BODY_PAD_M
 
     if applied_any:
         _apply_world_verts(cloth, working)
-        status = "APPLIED" if current_count > 0 else "CLEARED"
-        msg = (
-            "pairs remain after local push"
-            if current_count > 0
-            else "local body push cleared pairs"
+        if current_count > 0:
+            return "APPLIED", "pairs remain after local push"
+        return "CLEARED", "local body push cleared pairs"
+    return "NOOP", "local push moved nothing"
+
+
+def _dll_fix_cloth_only(
+    lib,
+    cloth: bpy.types.Object,
+    cloth_verts: np.ndarray,
+    cloth_faces: np.ndarray,
+) -> tuple[str, str]:
+    """Geometry-only FIX stage via shell_isect_fix (no checker gate).
+
+    Returns (fix_status, message). Writes cloth when status is APPLIED/CLEARED.
+    """
+    n_verts = ctypes.c_int32(cloth_verts.shape[0])
+    n_faces_cloth = ctypes.c_int32(cloth_faces.shape[0])
+    v_ptr = cloth_verts.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    f_ptr = cloth_faces.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+    out = np.empty_like(cloth_verts)
+    out_ptr = out.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+    before2 = ctypes.c_int32(0)
+    after_fix = ctypes.c_int32(0)
+    status = ctypes.c_int32(3)
+    rc = lib.shell_isect_fix(
+        v_ptr,
+        out_ptr,
+        n_verts,
+        f_ptr,
+        n_faces_cloth,
+        None,
+        0,
+        ctypes.byref(before2),
+        None,
+        0,
+        ctypes.byref(after_fix),
+        ctypes.byref(status),
+    )
+    if rc not in (0, 2):
+        return "FAILED", f"fix failed rc={rc}"
+    fix_name = _FIX_STATUS.get(int(status.value), f"STATUS_{int(status.value)}")
+    if fix_name in ("APPLIED", "CLEARED"):
+        _apply_world_verts(cloth, out)
+    return fix_name, f"dll fix status={fix_name}"
+
+
+def _mesh_for_check(
+    cloth: bpy.types.Object,
+    body: bpy.types.Object | None,
+    *,
+    use_body: bool,
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray | None]:
+    """Build checker arrays from the current Blender mesh(es)."""
+    cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
+    n_cloth_faces = int(cloth_faces.shape[0])
+    if use_body and body is not None:
+        verts, faces, n_cloth_faces, is_collider = _combined_cloth_body_arrays(
+            cloth, body
         )
-        return working, current_count, current_pairs, status, msg
-    return working, current_count, current_pairs, "NOOP", "local push moved nothing"
+        return verts, faces, n_cloth_faces, is_collider
+    return cloth_verts, cloth_faces, n_cloth_faces, None
 
 
 def run_check_and_fix(
@@ -619,7 +697,7 @@ def run_check_and_fix(
     *,
     include_body: bool = False,
 ) -> ShellIsectReport:
-    """Run shell-isect: check → local fix → check.
+    """Run shell-isect as CHECK 1 → FIX → CHECK 2.
 
     Parameters
     ----------
@@ -648,19 +726,14 @@ def run_check_and_fix(
             pairs=(),
             n_cloth_faces=0,
             include_body=use_body,
+            checks_run=0,
+            fix_attempted=False,
         )
 
     version = lib.shell_isect_version().decode("utf-8", errors="replace")
-    cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
-    n_cloth_faces = int(cloth_faces.shape[0])
-
-    if use_body:
-        verts, faces, n_cloth_faces, is_collider = _combined_cloth_body_arrays(
-            cloth, body
-        )
-    else:
-        verts, faces = cloth_verts, cloth_faces
-        is_collider = None
+    verts, faces, n_cloth_faces, is_collider = _mesh_for_check(
+        cloth, body, use_body=use_body
+    )
 
     if faces.shape[0] < 2:
         return ShellIsectReport(
@@ -668,19 +741,24 @@ def run_check_and_fix(
             version=version,
             pairs_before=0,
             pairs_after=0,
-            fix_status="NOOP",
+            fix_status="SKIPPED",
             message="fewer than 2 triangles",
             pairs=(),
             n_cloth_faces=n_cloth_faces,
             include_body=use_body,
+            checks_run=1,
+            fix_attempted=False,
         )
 
-    # --- 1) check ---
-    before_count, pairs_before, rc = _check_pairs(
+    # ------------------------------------------------------------------
+    # CHECK 1 — detect only (DLL shell_isect_check)
+    # ------------------------------------------------------------------
+    # Count first so the pair buffer can be sized exactly when needed.
+    check1_count, _pairs_stub, rc = _check_pairs(
         lib,
         verts,
         faces,
-        max_pairs=0 if is_collider is not None else _MAX_REPORT_PAIRS,
+        max_pairs=0,
         is_collider=is_collider,
     )
     if rc not in (0, 2):
@@ -689,33 +767,41 @@ def run_check_and_fix(
             version=version,
             pairs_before=-1,
             pairs_after=-1,
-            fix_status="FAILED",
-            message=f"check failed rc={rc}",
+            fix_status="SKIPPED",
+            message=f"check1 failed rc={rc}",
             pairs=(),
             n_cloth_faces=n_cloth_faces,
             include_body=use_body,
+            checks_run=1,
+            fix_attempted=False,
         )
 
-    if before_count == 0:
-        clean_msg = "clean" if use_body else "clean (cloth-only; body twin skipped)"
+    if check1_count == 0:
+        clean_msg = (
+            "check1 clean; fix skipped"
+            if use_body
+            else "check1 clean; fix skipped (cloth-only; body twin skipped)"
+        )
         return ShellIsectReport(
             available=True,
             version=version,
             pairs_before=0,
             pairs_after=0,
-            fix_status="NOOP",
+            fix_status="SKIPPED",
             message=clean_msg,
             pairs=(),
             n_cloth_faces=n_cloth_faces,
             include_body=use_body,
+            checks_run=1,
+            fix_attempted=False,
         )
 
-    # Fetch full pair list for the local fix pocket.
-    before_count, pairs_before, rc = _check_pairs(
+    # Materialize face pairs for the FIX stage pocket.
+    check1_count, check1_pairs, rc = _check_pairs(
         lib,
         verts,
         faces,
-        max_pairs=max(before_count, 1),
+        max_pairs=max(check1_count, 1),
         is_collider=is_collider,
     )
     if rc not in (0, 2):
@@ -724,115 +810,86 @@ def run_check_and_fix(
             version=version,
             pairs_before=-1,
             pairs_after=-1,
-            fix_status="FAILED",
-            message=f"check pairs failed rc={rc}",
+            fix_status="SKIPPED",
+            message=f"check1 pairs failed rc={rc}",
             pairs=(),
             n_cloth_faces=n_cloth_faces,
             include_body=use_body,
+            checks_run=1,
+            fix_attempted=False,
         )
 
-    # --- 2) local fix (cloth verts only) ---
-    fix_name = "NOOP"
-    message = "pairs remain"
-    after_count = before_count
-    pairs_after = pairs_before
-
+    # ------------------------------------------------------------------
+    # FIX — geometry only (DLL fix and/or host local push)
+    # ------------------------------------------------------------------
+    cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
     if use_body:
-        # Full twin path: body-aware local push + re-check on cloth+body.
-        (
-            _working,
-            after_count,
-            pairs_after,
-            fix_name,
-            message,
-        ) = _local_fix_cloth_against_body(
+        fix_name, fix_message = _local_fix_cloth_against_body(
             lib,
             cloth,
             body,
             cloth_verts,
             cloth_faces,
             n_cloth_faces,
-            pairs_before,
-            before_count,
+            check1_pairs,
+            check1_count,
         )
-        if after_count > _MAX_REPORT_PAIRS:
-            pairs_after = pairs_after[:_MAX_REPORT_PAIRS]
     else:
-        # Cloth-only path: DLL local-fix stub (no body mesh in the check).
-        n_verts = ctypes.c_int32(cloth_verts.shape[0])
-        n_faces_cloth = ctypes.c_int32(cloth_faces.shape[0])
-        v_ptr = cloth_verts.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        f_ptr = cloth_faces.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
-        out = np.empty_like(cloth_verts)
-        out_ptr = out.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        before2 = ctypes.c_int32(0)
-        after_fix = ctypes.c_int32(0)
-        status = ctypes.c_int32(3)
-        rc = lib.shell_isect_fix(
-            v_ptr,
-            out_ptr,
-            n_verts,
-            f_ptr,
-            n_faces_cloth,
-            None,
-            0,
-            ctypes.byref(before2),
-            None,
-            0,
-            ctypes.byref(after_fix),
-            ctypes.byref(status),
-        )
-        if rc not in (0, 2):
-            return ShellIsectReport(
-                available=True,
-                version=version,
-                pairs_before=before_count,
-                pairs_after=-1,
-                fix_status="FAILED",
-                message=f"fix failed rc={rc}",
-                pairs=(),
-                n_cloth_faces=n_cloth_faces,
-                include_body=use_body,
-            )
-        fix_name = _FIX_STATUS.get(int(status.value), f"STATUS_{int(status.value)}")
-        if fix_name in ("APPLIED", "CLEARED"):
-            _apply_world_verts(cloth, out)
-            cloth_verts = out
-        after_count, pairs_after, rc = _check_pairs(
-            lib, cloth_verts, cloth_faces, is_collider=None
-        )
-        if rc not in (0, 2):
-            return ShellIsectReport(
-                available=True,
-                version=version,
-                pairs_before=before_count,
-                pairs_after=-1,
-                fix_status=fix_name,
-                message=f"re-check failed rc={rc}",
-                pairs=(),
-                n_cloth_faces=n_cloth_faces,
-                include_body=use_body,
-            )
-        message = (
-            "ok (cloth-only; body twin skipped)"
-            if after_count == 0
-            else "pairs remain after fix (cloth-only)"
+        fix_name, fix_message = _dll_fix_cloth_only(
+            lib, cloth, cloth_verts, cloth_faces
         )
 
-    final_message = message
-    if after_count == 0 and fix_name == "CLEARED":
-        final_message = "ok" if use_body else "ok (cloth-only; body twin skipped)"
-    elif after_count == 0 and not use_body and not message:
-        final_message = "ok (cloth-only; body twin skipped)"
+    # ------------------------------------------------------------------
+    # CHECK 2 — detect only on post-FIX mesh (always after a FIX attempt)
+    # ------------------------------------------------------------------
+    verts2, faces2, n_cloth_faces2, is_collider2 = _mesh_for_check(
+        cloth, body, use_body=use_body
+    )
+    check2_count, check2_pairs, rc = _check_pairs(
+        lib,
+        verts2,
+        faces2,
+        max_pairs=max(check1_count, _MAX_REPORT_PAIRS),
+        is_collider=is_collider2,
+    )
+    if rc not in (0, 2):
+        return ShellIsectReport(
+            available=True,
+            version=version,
+            pairs_before=check1_count,
+            pairs_after=-1,
+            fix_status=fix_name,
+            message=f"check2 failed rc={rc}; fix={fix_message}",
+            pairs=(),
+            n_cloth_faces=n_cloth_faces2,
+            include_body=use_body,
+            checks_run=2,
+            fix_attempted=True,
+        )
+
+    if check2_count == 0:
+        final_message = (
+            "check2 clean after fix"
+            if use_body
+            else "check2 clean after fix (cloth-only; body twin skipped)"
+        )
+    else:
+        final_message = (
+            f"check2 residual pairs; {fix_message}"
+            if use_body
+            else f"check2 residual pairs (cloth-only); {fix_message}"
+        )
 
     return ShellIsectReport(
         available=True,
         version=version,
-        pairs_before=before_count,
-        pairs_after=after_count,
+        pairs_before=check1_count,
+        pairs_after=check2_count,
         fix_status=fix_name,
         message=final_message,
-        pairs=pairs_after[:_MAX_REPORT_PAIRS],
-        n_cloth_faces=n_cloth_faces,
+        pairs=check2_pairs[:_MAX_REPORT_PAIRS],
+        n_cloth_faces=n_cloth_faces2,
         include_body=use_body,
+        checks_run=2,
+        fix_attempted=True,
     )

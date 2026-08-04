@@ -827,15 +827,10 @@ class YOHSAI_OT_prepare_zozo(Operator):
             props.parse_status = f"Prepare for ZOZO stopped: {prepared.abort_message}"
             return {"CANCELLED"}
 
-        # Self-intersection check already passed inside prepare_for_zozo; MCP only.
-        notes: list[str] = []
-        if not prepared.self_intersection.resolved:
-            notes.append(f"note: {prepared.self_intersection.summary()}")
-
+        # Triangle self-intersection already gated by shell-isect; MCP only.
         summary = (
             f"Prepared {prepared.seam_count} ZOZO stitches "
             f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm)"
-            + (("; " + " ".join(notes)) if notes else "")
             + shell_suffix
         )
         try:

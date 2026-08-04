@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-import bmesh
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -21,9 +20,7 @@ ZOZO_CONTACT_GAP_M = 0.001
 # ZOZO keeps a loose stitch edge open by 1.1 * (gap_a + gap_b) + 1e-5.
 ZOZO_STITCH_OPENING_M = 1.1 * (2.0 * ZOZO_CONTACT_GAP_M) + 1.0e-5
 MAX_HANDOFF_SEAM_DISTANCE_M = 0.01
-# Clearance the self-intersection resolver leaves between cloth layers so ppf's
-# exact edge/coplanar test passes; kept below the ZOZO stitch opening.
-_SELF_INTERSECTION_CLEARANCE_M = 0.001
+# Body clearance used when opening stitch layers away from the collider surface.
 _BODY_CLEARANCE_M = 1.1 * ZOZO_CONTACT_GAP_M
 _HANDOFF_COLLECTION_ROLE = "zozo_handoff"
 _HANDOFF_CLOTH_ROLE = "zozo_cloth"
@@ -32,41 +29,6 @@ _HANDOFF_BODY_ROLE = "zozo_body"
 
 class ZozoHandoffError(RuntimeError):
     """The current Yohsai state cannot safely be handed to ZOZO."""
-
-
-@dataclass(frozen=True)
-class SelfIntersectionResult:
-    """Outcome of the hand-off self-intersection unfold pass.
-
-    ``remaining_vertices`` is the number of mesh vertices still involved in at
-    least one approximate self-intersection (edge-vs-triangle / face overlap),
-    not a count of intersection pairs.  Zero means the float BVH tests that
-    drive the resolver saw a clear shell; ppf's exact predicates remain the
-    final Transfer ground truth.
-    """
-
-    remaining_vertices: int
-    passes_used: int
-    max_passes: int
-    initial_vertices: int
-
-    @property
-    def resolved(self) -> bool:
-        return self.remaining_vertices == 0
-
-    def summary(self) -> str:
-        if self.resolved:
-            if self.initial_vertices == 0:
-                return "self-intersect: none"
-            return (
-                f"self-intersect: cleared {self.initial_vertices} verts "
-                f"in {self.passes_used} passes"
-            )
-        return (
-            f"self-intersect: {self.remaining_vertices} verts remain "
-            f"after {self.passes_used}/{self.max_passes} passes "
-            f"(started with {self.initial_vertices})"
-        )
 
 
 @dataclass(frozen=True)
@@ -80,7 +42,6 @@ class ZozoPreparation:
     cloth_group_name: str
     body_group_name: str
     project_name: str
-    self_intersection: SelfIntersectionResult
     shell_isect: ShellIsectReport
     # Soft-stop (e.g. shell-isect NG): status box only, no body export / MCP.
     # Prefer this over raising so Blender never auto-reports as レポート:エラー.
@@ -351,205 +312,6 @@ def _open_stitches(
     return result, maximum_before, minimum_after
 
 
-def _clamp_vertices_outside_body(coords: np.ndarray, body_bvh: BVHTree) -> None:
-    """Push any vertex that has entered the body back to its surface + clearance."""
-    for index in range(len(coords)):
-        location, normal, _face, _distance = body_bvh.find_nearest(Vector(coords[index]))
-        if location is None:
-            continue
-        if (Vector(coords[index]) - location).dot(normal) < 0.0:
-            coords[index] = np.asarray(location + normal * _BODY_CLEARANCE_M, dtype=np.float64)
-
-
-def _push_vertices_along_body_normal(
-    coords: np.ndarray,
-    vertices: set[int],
-    body_bvh: BVHTree,
-    distance_m: float,
-) -> None:
-    """Nudge residual verts outward along the body normal when smoothing stalls."""
-    if distance_m <= 0.0 or not vertices:
-        return
-    for index in vertices:
-        location, normal, _face, _distance = body_bvh.find_nearest(Vector(coords[index]))
-        if location is None:
-            continue
-        direction = np.asarray(tuple(normal), dtype=np.float64)
-        length = float(np.linalg.norm(direction))
-        if length <= 1.0e-12:
-            continue
-        coords[index] = coords[index] + (direction / length) * distance_m
-
-
-def _resolve_self_intersections(
-    obj: bpy.types.Object, body_bvh: BVHTree, max_passes: int = 48
-) -> SelfIntersectionResult:
-    """Unfold the drape's self-intersecting regions so ppf/ZOZO accepts the mesh.
-
-    ppf rejects any shell whose edge pierces another triangle at rest, and gather
-    sewing leaves the excess fabric folded onto itself at the shoulders, bust and
-    sides.  Pushing folds apart cascades and never converges, so instead each
-    intersecting cluster and its neighbourhood is strongly smoothed, which unfolds
-    the crumple.  Body clamp runs inside the loop so a smooth step cannot leave a
-    permanent inward penetration that reintroduces hits.  When the residual count
-    stalls, the neighbourhood widens, smoothing strengthens, and a small body-
-    normal push breaks the plateau.  Returns a structured result the caller must
-    honour: remaining > 0 means the shell is not yet Transfer-safe under our tests.
-    """
-    mesh = obj.data
-    world = obj.matrix_world
-    inverse = world.inverted_safe()
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bmesh.ops.triangulate(bm, faces=bm.faces)  # keeps vertex indexing
-    bm.verts.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    tris = [[v.index for v in f.verts] for f in bm.faces]
-    face_verts = [set(t) for t in tris]
-    coords = np.array([list(world @ v.co) for v in bm.verts], dtype=np.float64)
-    adjacency: list[list[int]] = [[] for _ in range(len(bm.verts))]
-    seen = [set() for _ in range(len(bm.verts))]
-    edges: list[tuple[int, int]] = []
-    for edge in bm.edges:
-        a, b = edge.verts[0].index, edge.verts[1].index
-        edges.append((a, b))
-        if b not in seen[a]:
-            adjacency[a].append(b)
-            seen[a].add(b)
-        if a not in seen[b]:
-            adjacency[b].append(a)
-            seen[b].add(a)
-
-    def involved_vertices(current: np.ndarray) -> set[int]:
-        # ppf detects real intersections (edge-vs-triangle plus a coplanar
-        # fallback) with exact predicates, which a float ray test cannot mirror
-        # exactly.  A strict tree and a 1 mm-inflated tree do not even nest, so
-        # take the union of both: the strict tree catches real piercings, the
-        # inflated tree catches near-touches and coplanar overlaps, and the
-        # resolver smooths until neither reports a hit -- leaving ppf's exact
-        # test a clearance below the >=2.2 mm ZOZO stitch openings, so the
-        # intentional loose stitches are never flagged.
-        points = [Vector(p) for p in current]
-        strict = BVHTree.FromPolygons(points, tris, all_triangles=True, epsilon=0.0)
-        inflated = BVHTree.FromPolygons(
-            points, tris, all_triangles=True, epsilon=_SELF_INTERSECTION_CLEARANCE_M
-        )
-        hits: set[int] = set()
-        for a, b in inflated.overlap(inflated):
-            if a < b and not (face_verts[a] & face_verts[b]):
-                hits.update(tris[a])
-                hits.update(tris[b])
-        for tree in (strict, inflated):
-            for a, b in edges:
-                start = Vector(current[a])
-                direction = Vector(current[b]) - start
-                length = direction.length
-                if length < 1.0e-9:
-                    continue
-                direction = direction / length
-                hit = tree.ray_cast(start + direction * 1.0e-8, direction, length - 2.0e-8)
-                if hit and hit[0] is not None:
-                    face = hit[2]
-                    if face is not None and a not in tris[face] and b not in tris[face]:
-                        hits.add(a)
-                        hits.add(b)
-                        hits.update(tris[face])
-        return hits
-
-    initial_hits = involved_vertices(coords)
-    initial_vertices = len(initial_hits)
-    passes_used = 0
-    previous_count: int | None = None
-    stall = 0
-
-    if initial_vertices == 0:
-        remaining = 0
-    else:
-        for pass_index in range(max_passes):
-            involved = involved_vertices(coords)
-            if not involved:
-                passes_used = pass_index
-                break
-            passes_used = pass_index + 1
-            count = len(involved)
-            if previous_count is not None and count >= previous_count:
-                stall += 1
-            else:
-                stall = 0
-            previous_count = count
-
-            # Escalate neighbourhood and smooth strength when the residual plateaus.
-            rings = 3 if stall >= 2 else 2
-            smooth_weight = 0.75 if stall >= 2 else 0.6
-            sub_iterations = 6 if stall >= 2 else 4
-            region = set(involved)
-            for _ring in range(rings):
-                grown = set(region)
-                for vertex in region:
-                    grown.update(adjacency[vertex])
-                region = grown
-
-            for _sub in range(sub_iterations):
-                updates = {
-                    vertex: coords[adjacency[vertex]].mean(axis=0)
-                    for vertex in region
-                    if adjacency[vertex]
-                }
-                keep = 1.0 - smooth_weight
-                for vertex, target in updates.items():
-                    coords[vertex] = smooth_weight * target + keep * coords[vertex]
-
-            # Body clamp inside the loop so smooth-induced penetrations are not
-            # left for a single post-hoc fix that never re-detects.
-            _clamp_vertices_outside_body(coords, body_bvh)
-
-            if stall >= 3:
-                # Small outward nudge along the body normal breaks stuck folds
-                # without cascading a full push-apart between cloth layers.
-                _push_vertices_along_body_normal(
-                    coords,
-                    involved,
-                    body_bvh,
-                    0.5 * _SELF_INTERSECTION_CLEARANCE_M,
-                )
-                _clamp_vertices_outside_body(coords, body_bvh)
-        else:
-            # Exhausted max_passes without a clean detect mid-loop.
-            passes_used = max_passes
-
-        _clamp_vertices_outside_body(coords, body_bvh)
-        remaining_hits = involved_vertices(coords)
-        remaining = len(remaining_hits)
-        if remaining:
-            # Persist residual vertex indices for inspection / later MCP rescue.
-            obj["yohsai_self_intersect_residual"] = sorted(remaining_hits)
-        elif "yohsai_self_intersect_residual" in obj:
-            del obj["yohsai_self_intersect_residual"]
-
-    # Persist the resolved positions AND the triangulation: ppf triangulates any
-    # remaining quads with its own diagonal, which can re-introduce an
-    # intersection the resolver already cleared on its triangulation.  Writing
-    # the triangulated mesh back hands ppf exactly the triangles that were
-    # verified intersection-free.
-    bm.verts.ensure_lookup_table()
-    for index in range(len(coords)):
-        bm.verts[index].co = inverse @ Vector(coords[index])
-    bm.to_mesh(mesh)
-    bm.free()
-    mesh.update()
-
-    result = SelfIntersectionResult(
-        remaining_vertices=int(remaining),
-        passes_used=int(passes_used),
-        max_passes=int(max_passes),
-        initial_vertices=int(initial_vertices),
-    )
-    obj["yohsai_self_intersect_remaining"] = result.remaining_vertices
-    obj["yohsai_self_intersect_passes"] = result.passes_used
-    obj["yohsai_self_intersect_initial"] = result.initial_vertices
-    return result
-
-
 def _pattern_positions(obj: bpy.types.Object) -> list[tuple[float, float]]:
     attribute = obj.data.attributes.get("yohsai_pattern_position")
     if (
@@ -759,12 +521,6 @@ def prepare_for_zozo(
 
     handoff = _handoff_collection(context, collection)
     cloth = _create_cloth_object(handoff, collection, parts, positions, seams)
-    # Unfold the gather-drape's self-intersections so ppf/ZOZO accepts the shell.
-    try:
-        intersection = _resolve_self_intersections(cloth, bvh)
-    except Exception:
-        _remove_object_and_owned_mesh(cloth)
-        raise
 
     # Body copy is required before shell-isect: Transfer checks cloth+STATIC body
     # as one mesh (collider × collider skipped). Twin detection must see body.
@@ -785,8 +541,10 @@ def prepare_for_zozo(
     cloth["yohsai_zozo_group"] = cloth_group_name
     body_copy["yohsai_zozo_group"] = body_group_name
 
-    # shell-isect: default cloth-only (fast). Optional cloth+body twin is slow.
-    # PASS (pairs == 0): MCP. NG: report face pairs, keep copies, no MCP.
+    # Triangle self-intersection: shell-isect only (not host BVH).
+    # Strict stages: CHECK 1 → FIX → CHECK 2 (see shell_isect_bridge).
+    # Default cloth-only (fast). Optional cloth+body twin is slow.
+    # PASS (check2 pairs == 0): MCP. NG: report face pairs, keep copies, no MCP.
     shell_report = run_check_and_fix(
         cloth,
         body_copy,
@@ -795,6 +553,9 @@ def prepare_for_zozo(
     cloth["yohsai_shell_isect"] = shell_report.summary()
     cloth["yohsai_shell_isect_version"] = shell_report.version
     cloth["yohsai_shell_isect_include_body"] = bool(shell_report.include_body)
+    cloth["yohsai_shell_isect_pipeline"] = shell_report.pipeline_token()
+    cloth["yohsai_shell_isect_checks_run"] = int(shell_report.checks_run)
+    cloth["yohsai_shell_isect_fix_attempted"] = bool(shell_report.fix_attempted)
     cloth["yohsai_shell_isect_pairs_before"] = int(shell_report.pairs_before)
     cloth["yohsai_shell_isect_pairs_after"] = int(shell_report.pairs_after)
     cloth["yohsai_shell_isect_fix"] = shell_report.fix_status
@@ -807,7 +568,6 @@ def prepare_for_zozo(
         del cloth["yohsai_shell_isect_face_pairs"]
 
     if not shell_report.passed:
-        cloth["yohsai_self_intersect_warning"] = True
         # Do not raise: Blender surfaces uncaught/mismatched exceptions as
         # レポート:エラー. Soft-abort keeps the message in the status box only.
         # Body copy stays for inspection (cloth–body pairs need both meshes).
@@ -821,12 +581,9 @@ def prepare_for_zozo(
             cloth_group_name=cloth_group_name,
             body_group_name=body_group_name,
             project_name=_project_name(collection.name),
-            self_intersection=intersection,
             shell_isect=shell_report,
             abort_message=shell_report.error_report(),
         )
-
-    cloth["yohsai_self_intersect_warning"] = not intersection.resolved
 
     return ZozoPreparation(
         collection=handoff,
@@ -838,6 +595,5 @@ def prepare_for_zozo(
         cloth_group_name=cloth_group_name,
         body_group_name=body_group_name,
         project_name=_project_name(collection.name),
-        self_intersection=intersection,
         shell_isect=shell_report,
     )
