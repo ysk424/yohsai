@@ -18,7 +18,8 @@ The N-panel contains these inputs:
 
 The normal operation order is:
 
-1. `Load` creates one Mesh object per pattern panel instance and turns `Auto` on.
+1. `Load` creates one Mesh object per pattern panel instance and turns
+   `Existing Lock` on.
 2. Translate and rotate the separate parts in Object Mode.
 3. Select the Body, then press `Zero GRAVITY` or `Normal GRAVITY`. Yohsai runs
    Sewing automatically immediately before the simulation.
@@ -33,9 +34,9 @@ Every part has two independent attributes: the monotonic `PLACED` -> `PENDING`
 its state to `DONE` without changing that Lock. It therefore remains deformable
 for repeated GRAVITY clicks.
 
-Load turns **Existing Lock** (formerly Auto) on and locks `PLACED` and existing
-`DONE` parts; pending parts stay unlocked. Turning Existing Lock off unlocks
-every non-placed part; turning it on applies that rule again. A `PLACED` part
+Load turns **Existing Lock** on and locks `PLACED` and existing `DONE` parts;
+pending parts stay unlocked. Turning Existing Lock off unlocks every
+non-placed part; turning it on applies that rule again. A `PLACED` part
 remains outside the simulation. **Select Lock** is a button that locks or
 unlocks the selected clothes parts (same deformation Lock attribute). Existing
 Lock and Select Lock cannot both be on; both may be off.
@@ -89,7 +90,7 @@ initial cloth shape. Body geometry is not used by Sewing.
 ## GRAVITY
 
 GRAVITY starts from the positioned source-panel vertices. The solver is always
-the native CPU Square-Lattice Cloth solver; no solver or iteration setup is
+the native Square-Lattice Cloth library; no solver or iteration setup is
 required.
 
 Each click applies:
@@ -105,11 +106,11 @@ diagonal carries no spring, and no material term reads Body shape, normals, or
 bones. The Body may influence particles only through collision contact.
 
 Every click uses eight 1/240-second substeps; Normal GRAVITY uses 16
-material/contact iterations and Zero GRAVITY uses 24 (1.5x). Each click also uses a
-16 mm-per-substep seam closure with 2 mm capture, and 5 mm contact thickness.
-Sewing moves the pair kinematically and adds no momentum. `Zero gravity` applies 0 m/s² and `Normal gravity` applies 9.81 m/s²
-in world -Z. The two buttons may be alternated without resetting the live
-simulation.
+material/contact iterations and Zero GRAVITY uses 24 (1.5x). Sewing moves the
+pair kinematically and adds no momentum. `Zero gravity` applies 0 m/s² and
+`Normal gravity` applies 9.81 m/s² in world -Z. The two buttons may be
+alternated without resetting the live simulation. `KITSUKE_DESIGN.md` lists
+every fixed runtime value and the constant that defines it.
 
 After a click, positions are scattered back to the separate part objects. Object
 translation and rotation are supported between clicks; scaling and vertex-count
@@ -118,8 +119,8 @@ reserved for a non-finite solver state.
 
 On a successful click, pending parts become `DONE` without being relocked, so
 GRAVITY may repeat immediately. Moving another placed part starts a new
-automatic Sewing stage. A later Load or switching Auto on performs the explicit
-Auto-lock operation and locks done parts while retaining seam connectivity.
+automatic Sewing stage. A later Load or switching Existing Lock on locks done
+parts while retaining seam connectivity.
 
 Undo and Redo store the solver state needed to reconstruct the live session
 inside the same add-on runtime. Continuing a partially dressed session after
@@ -130,7 +131,7 @@ restarting Blender is unsupported.
 `Prepare for ZOZO` is available after at least one completed GRAVITY step. It
 does not modify, join, rename, hide, or move the source Yohsai parts. Pipeline:
 
-1. Build internal ZOZO **cloth** copy (stitch opening, approximate unfold).
+1. Build internal ZOZO **cloth** copy (stitch opening, residual pinch welding).
 2. Build internal ZOZO **body** copy (always; ZOZO MCP / Transfer need it).
 3. **shell-isect check** — default **cloth-only** (fast, practical). Optional
    panel toggle **Shell-isect vs Body** enables the full cloth+body twin
@@ -191,22 +192,23 @@ Character silhouettes are exported separately with
 
 - `SVG_TO_JSON_SPEC.md`: input, JSON, Load, automatic Sewing, GRAVITY, and Update contract;
 - `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
-- `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
+- `KITSUKE_DESIGN.md`: simulation workflow, invariants, and every fixed runtime value;
 - `SOLVER_DESIGN.md`: native particle solver and compatibility boundary;
 - `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
-- `PPF_OPEN_ISSUES.md`: known hand-off defects, to be fixed against a running
-  solver rather than from the code.
+- `SEAM_BOUNDARY_LAYER_DESIGN.md`: seam paving band and E/P/N vertex kinds;
+- `DEVELOPMENT_NOTES.md`: architecture summary and build notes.
 
 ## Platforms
 
 Yohsai ships for **Windows x64** only (`yohsai-<version>-windows_x64.zip`).
-The package bundles `yohsai_solver.dll` and the licensed `vcomp140.dll` OpenMP
-runtime. macOS packages are no longer maintained.
+The package bundles `yohsai_solver.dll`, the licensed `vcomp140.dll` OpenMP
+runtime, and `shell_isect.dll`.
 
 ## Native development
 
-Visual Studio 2022 Build Tools, CMake, and the standard OpenMP runtime are
-sufficient for the CPU backend:
+Visual Studio 2022 Build Tools and CMake build the solver; the MSVC OpenMP
+runtime is required. CUDA is used for coloured material projections when a
+compiler is present and is switched off automatically when it is not.
 
 ```powershell
 .\build_native.ps1 -Configuration Release

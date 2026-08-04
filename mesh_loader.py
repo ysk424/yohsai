@@ -73,8 +73,8 @@ def part_moved_from_load(obj: bpy.types.Object) -> bool:
     try:
         loaded = tuple(float(value) for value in obj[LOAD_MATRIX_KEY])
     except (KeyError, TypeError, ValueError):
-        # Blend files created before placement tracking retain the old behavior:
-        # their parts remain eligible instead of becoming unusable.
+        # No recorded Load pose: treat the part as moved so it stays eligible
+        # rather than becoming unusable.
         return True
     current = _matrix_tuple(obj.matrix_world)
     return len(loaded) != 16 or any(
@@ -89,9 +89,9 @@ def part_gravity_state(obj: bpy.types.Object) -> str:
     if state in GRAVITY_STATES:
         return state
 
-    # Migrate files saved before the three-state workflow.  An old Auto-locked
-    # moved part has already completed a simulation step; other moved parts are
-    # waiting for their first Gravity click.
+    # No recorded state: derive one.  A locked moved part has already completed
+    # a simulation step; other moved parts are waiting for their first GRAVITY
+    # click.
     if not part_moved_from_load(obj):
         state = GRAVITY_STATE_PLACED
     elif bool(obj.get(LOCKED_OBJECT_KEY, False)):

@@ -54,10 +54,9 @@ placement convenience. It gives the newly cut cloth a useful starting location.
 It does not mean the old and new meshes are the same physical cloth, and it must
 not constrain future pattern changes.
 
-The first Update implementation may transfer a moderately resized pattern by
-mapping new flat-pattern vertices through the old flat triangulation and
-interpolating the old 3D pose. This is intentionally provisional. It will not
-cover every future edit, including:
+Update transfers a moderately resized pattern by mapping new flat-pattern
+vertices through the old flat triangulation and interpolating the old 3D pose.
+This is intentionally provisional. It does not cover every edit, including:
 
 - adding or removing a dart;
 - changing a straight collar into a curved collar;
@@ -119,8 +118,8 @@ For the initial Update scope:
 
 ## 6. Sewing is automatic and reusable internally
 
-Sewing remains a reusable connectivity engine, but it is no longer a separate
-user action. Pressing either GRAVITY button promotes moved placed parts to the
+Sewing is a reusable connectivity engine, not a separate user action.
+Pressing either GRAVITY button promotes moved placed parts to the
 pending state, clears the independent deformation Lock on those pending parts,
 runs Sewing immediately, and only then advances the simulation. Completing the
 step changes state only; it must not re-lock the parts.
@@ -212,8 +211,7 @@ silhouette export lives in documented Scripting utilities instead.
 ## 10. V2 automatic operator
 
 The long-term V2.0.0 concept replaces or assists the human placement operator
-with a small language model, currently envisioned as a GPT-5.4-nano-class API
-workflow:
+with a small language model API:
 
 1. provide textual dressing instructions and current garment metadata;
 2. receive JSON calls describing placement operations;

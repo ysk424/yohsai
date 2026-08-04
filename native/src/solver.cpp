@@ -898,14 +898,11 @@ void Solver::project_body_contacts_external(const int32_t* candidates, int32_t c
         if (signed_distance < config_.contact_thickness) {
             contact_corrections_[static_cast<size_t>(vertex_index)] +=
                 normal * (config_.contact_thickness - signed_distance);
-            // Stash the most negative signed distance in the count channel's
-            // companion: reuse correction_counts as a hit counter only; the
-            // penetration decision is re-evaluated from the averaged vector
-            // length vs thickness below is not needed — apply full vs capped
-            // using the mean correction direction after averaging.
             ++contact_correction_counts_[static_cast<size_t>(vertex_index)];
             // Track whether any contributing sample was penetrating via the
-            // high bit of the count (counts stay small; safe for int32).
+            // high bit of the count (counts stay small; safe for int32). The
+            // corrections themselves are averaged below, so the full-vs-capped
+            // decision has to travel separately from the summed vector.
             if (signed_distance < 0.0F) {
                 contact_correction_counts_[static_cast<size_t>(vertex_index)] |=
                     static_cast<int32_t>(1u << 30);
@@ -930,8 +927,8 @@ void Solver::project_body_contacts_external(const int32_t* candidates, int32_t c
         Vec3 correction =
             contact_corrections_[static_cast<size_t>(index)] / static_cast<float>(hits);
         // Penetrating: project fully to the thickness shell (no soft cap).
-        // Outside but inside the shell: allow up to contact_thickness per pass
-        // (was max_pos*0.04 ≈ 0.2 mm — too weak against seams).
+        // Outside but inside the shell: allow up to contact_thickness per pass.
+        // A smaller cap loses to the seam drag and lets cloth sink into the body.
         if (!penetrating) {
             correction = clamp_length(correction, config_.contact_thickness);
         }
@@ -940,8 +937,8 @@ void Solver::project_body_contacts_external(const int32_t* candidates, int32_t c
 }
 
 int32_t Solver::gather_body_contacts_auto() {
-    // One nearest body face per cloth vertex. Matches the former Python
-    // broadphase (AABB pad + radius query, unlimited nearest when inside AABB).
+    // One nearest body face per cloth vertex: AABB pad + radius query, with an
+    // unlimited nearest query for vertices that are inside the AABB.
     constexpr float kCollisionSearchM = 0.04F;
     const float search = std::max(config_.contact_thickness, kCollisionSearchM);
     const float pad = search + 1.0e-6F;
@@ -1027,8 +1024,8 @@ void Solver::project_body_contacts_auto(bool gather) {
         if (signed_distance < config_.contact_thickness) {
             Vec3 correction = normal * (config_.contact_thickness - signed_distance);
             // Penetrating (inside the body): full jump to the thickness shell.
-            // Outside but still inside the shell: strong cap = thickness (5 mm),
-            // not the old max_pos*0.04 ≈ 0.2 mm which lost to seam drag.
+            // Outside but still inside the shell: cap at the thickness, which
+            // has to stay strong enough to hold against the seam drag.
             if (signed_distance >= 0.0F) {
                 correction = clamp_length(correction, config_.contact_thickness);
             }

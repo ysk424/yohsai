@@ -23,17 +23,17 @@ Status: current development state
 - Body participates only through contact correction, which dissipates only.
 - Self-contact and Body-relative rest-shape forces are absent.
 - Zero gravity and Normal gravity select 0 or 9.81 m/s² per click in world -Z.
-- Existing Lock (formerly Auto) is event-driven. Load and turning it on lock
-  PLACED/DONE and unlock PENDING; turning it off unlocks non-placed parts.
-  Select Lock is a button that toggles Lock on the selection. Both may be off;
-  both must not be on. GRAVITY completion never changes Lock by itself.
+- Existing Lock is event-driven. Load and turning it on lock PLACED/DONE and
+  unlock PENDING; turning it off unlocks non-placed parts. Select Lock is a
+  button that toggles Lock on the selection. Both may be off; both must not be
+  on. GRAVITY completion never changes Lock by itself.
 - The product path always uses the native Square-Lattice solver. Normal GRAVITY
   uses 16 material iterations; Zero GRAVITY uses 24 (1.5x) so one press does
   more settle work relative to fixed Blender mesh round-trip cost.
 - When built with CUDA (`YSC_ENABLE_CUDA`), coloured material projections can
   run on the GPU (sm_89/sm_120). Auto-select uses CUDA when edge count ≥ 20k;
   smaller meshes stay on OpenMP. Override with env `YSC_FORCE_MATERIAL=cuda|cpu`.
-- Uncaptured seams close 16 mm per substep (constant kinematic drag, no momentum).
+- Uncaptured seams close 28 mm per substep (constant kinematic drag, no momentum).
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.
 - Update recuts meshes from stable panel labels.
@@ -61,41 +61,39 @@ The extension and native project versions are defined in
 .\build_native.ps1 -Configuration Release
 ```
 
-### OpenMP colouring (0.8.2+) and RTX auto-contact (0.9.2 / API 9)
+### Parallel solver
 
-The native square-lattice solver parallelises material projections with OpenMP.
+The native square-lattice solver parallelises material projections over a
+constraint colouring; `SOLVER_DESIGN.md` owns that contract. Operational notes:
 
-- At create time the solver greedily colours seams, edges, quads, and bends so
-  that constraints of one colour never share a vertex.
-- Each colour is projected with OpenMP; one parallel team is kept across
-  colours in a family to avoid repeated MSVC fork/join.
-- Colours stay sequential (Gauss-Seidel across colours, independent within a
-  colour). Integrate, finish, and auto contact apply are vertex-parallel.
 - Thread count is the usual OpenMP control: `OMP_NUM_THREADS` (and the MSVC
   runtime `vcomp140.dll` already shipped under `bin/`).
+- One parallel team is kept across the colours of a family to avoid repeated
+  MSVC fork/join.
+- With correct colouring, different thread counts must match each other; if
+  they disagree, colouring is incomplete. `tests/openmp_colour_smoke.py`
+  checks that property on a small hanging lattice.
 
-**API 9 / `YSC_BODY_CANDIDATES_AUTO`:** Body nearest-face queries run inside
-the DLL on a host AABB BVH built at create time. The Python
-`bvh.find_nearest` loop and Blender `BVHTree` construction are no longer on
-the product click path. Kitsuke passes `body_candidates=None` so the solver
-gathers once per substep and reuses faces for later contact passes.
+### Hardware target and measured cost
 
-Colouring changes the pure serial Gauss-Seidel update order: neighbouring
-constraints only see updates from earlier colours. Settled poses can differ
-from pre-0.8.2 builds even at the same iteration count. With correct
-colouring, different thread counts should match each other; if they disagree,
-colouring is incomplete. `tests/openmp_colour_smoke.py` checks that property
-on a small hanging lattice.
+Private branch target: Ryzen 9 9950X3D (32 threads) + RTX 5070 Ti (sm_120,
+16 GB, CUDA 12.9), Windows x64. Reference scene OMOTE+URA, cloth ~5.5k verts,
+~11k edges, 120 seams, CC_Base_Body 225k verts, Zero GRAVITY ×15:
 
-There is no broad product test suite. Older suites asserted values from
-superseded designs — a 5 mm lattice, a Finished Garment operator, an SVG input
-path — so they blocked corrections instead of catching regressions. Write new
-tests against the code as it is when they are needed, and delete them again
-rather than let them drift.
+| Path | Steady click mean | First click |
+| --- | ---: | ---: |
+| Python BVH broadphase + OpenMP | ~71 ms | ~1.04 s (Blender BVH) |
+| Native BVH auto + OpenMP team | ~43 ms | ~0.61 s (native BVH build) |
+
+Material Gauss-Seidel is still ~30 ms of a steady click, so it is the next
+lever when panel counts grow. Interactive target is a click that feels like a
+button press rather than a progress bar.
+
+There is no broad product test suite. Write new tests against the code as it is
+when they are needed, and delete them again rather than let them drift.
 
 `blender_manifest.toml` `[build] paths` is the authoritative file list: current
-source, documentation, `bin/yohsai_solver.dll`, and `bin/vcomp140.dll`.
-Wheels come from the separate `wheels` key.
-Build directories, caches, temporary files, local PDFs, and earlier ZIPs are
-excluded. Deleting a documentation file requires removing its `paths` entry too,
-or the build fails on the missing path.
+source, documentation, and the shipped DLLs under `bin/`. Wheels come from the
+separate `wheels` key. Build directories, caches, temporary files, local PDFs,
+and earlier ZIPs are excluded. Deleting a documentation file requires removing
+its `paths` entry too, or the build fails on the missing path.

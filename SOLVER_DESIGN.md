@@ -2,7 +2,7 @@
 
 Status: current native runtime contract
 
-The runtime is a Body-independent square-lattice cloth solver with a version-8
+The runtime is a Body-independent square-lattice cloth solver with a version-9
 C ABI (`YSC_API_VERSION` in `c_api.h`, matched by `API_VERSION` in
 `native_solver.py`; a mismatch refuses to load).
 
@@ -36,11 +36,9 @@ Letting a span collapse instead makes compression a one-way ratchet, because a
 span shorter than rest would never be visited again, and the panel silently
 loses the dimensions the pattern authored.
 
-Because a pure serial Gauss-Seidel pass carries a length correction only about
-one span further into the sheet, edge sweeps used to repeat four times per
-iteration. With OpenMP colouring, colours already walk sequentially, so one
-forward pass and one reverse pass per iteration are enough to reach the middle
-of a panel and keep the lattice on its authored spacing under sewing load.
+Colours already walk sequentially, so one forward pass and one reverse pass per
+iteration are enough to reach the middle of a panel and keep the lattice on its
+authored spacing under sewing load.
 
 For an ordered quad `(x0, x1, x2, x3)`, the averaged material spans are
 
@@ -74,24 +72,32 @@ Each substep performs:
    iteration (and always the last iteration of the substep);
 5. velocity reconstruction from the accepted position change.
 
-Forward and reverse edge sweeps alternate to reduce ordering bias. With OpenMP
-colouring, one edge sweep already propagates across the colour diameter, so a
-second reverse pass is enough. Every local correction is mass weighted and
-bounded. The uncaptured seam closure is a fixed distance (default 16 mm per
-substep), independent of how far apart the pair still is. At 2 mm or after
-endpoint crossing, the pair is captured at zero distance. There is no
-seam-target shortening, Body attraction, shape matching, self-contact, or speed
-clamp.
+Forward and reverse edge sweeps alternate to reduce ordering bias. One edge
+sweep already propagates across the colour diameter, so a second reverse pass is
+enough. Every local correction is mass weighted and bounded. The uncaptured seam
+closure is a fixed distance (`seam_attraction_step`, default 28 mm per substep),
+independent of how far apart the pair still is. At 2 mm or after endpoint
+crossing, the pair is captured at zero distance. There is no seam-target
+shortening, Body attraction, shape matching, self-contact, or speed clamp.
 
-### OpenMP colouring
+### Colouring and backends
 
 Seams / edges / quads / bends are greedily coloured so each colour class is
 vertex-disjoint. Projection walks colours in order (or reverse) and runs
 `#pragma omp parallel for` inside a colour. Integrate and contact apply are
-per-vertex parallel; Body candidate accumulation stays serial. Thread count is
-`OMP_NUM_THREADS`. Colouring changes the pure serial Gauss-Seidel update order,
-so settled poses can differ from pre-colouring builds; different thread counts
-on the same coloured schedule should match.
+per-vertex parallel. Thread count is `OMP_NUM_THREADS`. Colouring is not the
+pure serial Gauss-Seidel update order, but different thread counts on the same
+coloured schedule must agree; `tests/openmp_colour_smoke.py` checks that.
+
+When built with `YSC_ENABLE_CUDA`, the same colour schedule runs the material
+projections on the GPU (`material_cuda.cu`, sm_89 / sm_120). The host keeps
+integrate, seam attraction, capture, and Body contact. Auto-select prefers CUDA
+at 20k edges or more; `YSC_FORCE_MATERIAL=cuda|cpu` overrides it. Without a
+device the solver stays on OpenMP.
+
+Body nearest-face queries run inside the DLL on an AABB BVH built at create time
+(`body_bvh.hpp`), selected with `YSC_BODY_CANDIDATES_AUTO`. The advance loop
+gathers once per substep and reuses those faces for later contact passes.
 
 Sewing is an operator instruction rather than a force, so it must not become
 momentum. The drag is applied ahead of the prediction, which rebases `previous`

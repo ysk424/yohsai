@@ -41,7 +41,6 @@ paths = [
     "SOLVER_DESIGN.md",
     "GRAINLINE_DESIGN.md",
     "SEAM_BOUNDARY_LAYER_DESIGN.md",
-    "PPF_OPEN_ISSUES.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
     "README.md",
@@ -62,5 +61,4 @@ paths = [
     "native/src/solver.hpp",
     "native/src/solver.cpp",
     "native/src/c_api.cpp",
-    "RTX_ACCEL.md",
 ]

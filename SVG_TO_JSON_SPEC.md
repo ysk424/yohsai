@@ -238,7 +238,7 @@ Numbers must be finite JSON numbers. The output contains no NaN or Infinity.
 
 ## 9. Blender user interface
 
-`README.md` describes the N-panel, the part states, and the Auto-lock rules.
+`README.md` describes the N-panel, the part states, and the lock rules.
 This section states only what the parser contract requires of it:
 
 `Load` validates the path, starts the external parser, and returns control to
@@ -270,14 +270,15 @@ authored mesh dimensions.
 
 ### 10.3 Grain-aligned material mesh and triangulated proxy
 
-Bezier and line boundaries are sampled at no more than approximately `0.01 m`
-between boundary vertices. Yohsai fills the interior from a global 10 mm
-square grid in pattern-page coordinates: page vertical is warp and page
-horizontal is weft. One constant, `MESH_SPACING_M` in `mesh_loader.py`, sets
-both the boundary sampling pitch and the interior grid pitch. Complete square cells retain grain metadata. Their two
-Blender/collision faces share one proxy diagonal. Arbitrary panel cuts leave a
-narrow triangular transition near the boundary. `Load` does not create loose
-sewing-preview edges, perform Sewing, or add a Blender Cloth modifier.
+Yohsai fills the interior from a global square grid in pattern-page coordinates:
+page vertical is warp and page horizontal is weft. One constant per panel sets
+both the boundary sampling pitch and the interior grid pitch; `GRAINLINE_DESIGN.md`
+owns the pitch rules and the small-panel exception. Complete square cells retain
+grain metadata. Their two Blender/collision faces share one proxy diagonal.
+Arbitrary panel cuts leave a narrow triangular transition near the boundary.
+Sewing-relevant boundaries additionally carry the paving band of
+`SEAM_BOUNDARY_LAYER_DESIGN.md`. `Load` does not create loose sewing-preview
+edges, perform Sewing, or add a Blender Cloth modifier.
 
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
 named `sewing_<LABEL>`. Fold edges use the Boolean mesh attribute `fold`.
@@ -407,7 +408,7 @@ Gravity choice and fixed material values are runtime behavior rather than
 pattern data and do not alter the JSON contract. The two gravity buttons may be
 alternated during one live session. Material rest data is taken only from the
 pattern mesh; Body data is collision-only. The only product backend is the
-native CPU Square-Lattice library, packaged for Windows x64.
+native Square-Lattice library, packaged for Windows x64.
 
 ## 13. Update
 

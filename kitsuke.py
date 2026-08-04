@@ -65,8 +65,9 @@ class _PartRange:
 class _BodySnapshot:
     vertices: np.ndarray
     faces: np.ndarray
-    # Optional Blender BVH kept only for legacy Python candidate paths.
-    # The product advance path uses the native solver BVH (API v9 auto mode).
+    # Always None: the advance path gathers contacts with the native solver BVH
+    # (API 9 auto mode). The Python candidate helpers below are unused and will
+    # fail on a None bvh if anything calls them again.
     bvh: BVHTree | None
     ray_distance: float
     bounds_minimum: np.ndarray

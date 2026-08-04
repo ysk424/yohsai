@@ -894,7 +894,6 @@ class YOHSAI_PT_main(Panel):
             text="Select Lock",
             depress=bool(props.select_lock_mode),
         )
-        # Existing Lock: former Auto.
         lock_row.prop(props, "auto_lock", text="Existing Lock", toggle=True)
         layout.separator(factor=0.4)
         actions = layout.column(align=True)

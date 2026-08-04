@@ -83,68 +83,25 @@ farther outside the body, so the adjacent panel triangles stretch across the
 hole without bending the panels or entering the body. Like a real 2 mm stitch
 line this is a small, deliberate imperfection, accepted as part of the garment.
 
-## ZOZO hand-off self-intersection resolution
+## ZOZO hand-off self-intersection
 
-ppf/ZOZO rejects any shell whose edge pierces another triangle of the same mesh
-at rest ("Cannot create session: ... self-intersections"); it only detects, it
-ships no resolver.  Gather sewing leaves the excess fabric folded onto itself in
-the completed drape -- at the shoulders (the eased sleeve cap), the bust, and the
-sides -- so the hand-off shell carries hundreds of self-intersections that are
-inherent to the drape, not to the seam matching.  `prepare_for_zozo` resolves
-them on the cloth object, right after it is built, before handing off.
+ppf/ZOZO rejects any shell whose triangles intersect at rest; it only detects,
+it ships no resolver. Gather sewing leaves excess fabric folded onto itself in
+the completed drape, so the hand-off shell can carry intersections that are
+inherent to the drape rather than to the seam matching.
 
-Pushing intersecting triangles apart does not work: separating one fold cascades
-into new intersections and never converges.  Instead each fold is unfolded by
-smoothing its neighbourhood:
-
-1. Detect the hits and take the union of their vertices.  ppf uses exact
-   predicates (edge-vs-triangle plus a coplanar fallback), which a float ray
-   test cannot mirror exactly -- a strict BVH and a 1 mm-inflated BVH do not
-   even nest.  So run three tests and union them: a face-vs-face overlap on the
-   inflated tree (cheap, catches the deep gather folds), and an
-   **edge-vs-triangle** ray test over every mesh edge on **both** the strict and
-   the inflated tree.  The edge test is the one that catches seam and
-   panel-boundary edges (including the loose stitch edges) piercing a triangle
-   with no face overlapping.  The 1 mm clearance stays below the >=2.2 mm ZOZO
-   stitch openings, so the intentional loose stitches are never flagged, and it
-   gives ppf's exact test headroom.  Edges that share a vertex with the
-   triangle are excluded.
-2. Expand the hit vertices by **two rings** along the mesh -- solve the region
-   around each hit, not just the hit.
-3. Strongly Laplacian-smooth that region (0.6 toward the neighbour average, four
-   sub-iterations) to flatten the crumple.
-4. Repeat until no intersection remains (capped at 48 passes).  Body clamp runs
-   **inside** each pass.  When residual vertex counts stall, the neighbourhood
-   widens, smoothing strengthens, and a half-clearance push along the body
-   normal breaks the plateau.
-5. If residual vertices remain, Prepare keeps the best-effort cloth/body copies
-   for inspection, reports `self-intersect: N verts remain after P/M passes`,
-   and refuses ZOZO MCP setup.  The count is involved vertices, not pair count.
-
-The folds sit outside the body, so flattening them does not drive cloth inward;
-any vertex still inside the body is clamped back onto its surface plus the body
-clearance.  ppf then re-sews the loose stitches and re-drapes the smoothed
-region with contact, which re-forms the gathers without re-creating the
-self-intersection.
-
-The resolved mesh is handed off **already triangulated**.  The cloth still
-carries grain quads, and ppf triangulates any quad with its own diagonal, which
-can re-introduce an intersection the resolver already cleared on the opposite
-diagonal.  Persisting the resolver's triangulation gives ppf exactly the
-triangles that were verified intersection-free.
-
-On the reference garment this took the hand-off shell from 526 self-intersections
-to 0 in under a second, with no body penetration and the 1:1 seams intact.  The
-smoothing is method one; the body clamp is the fallback method two for any fold
-that a purely tangential smoothing could not lift clear.
+Detection and repair both live in the external `shell_isect.dll`, driven by
+`shell_isect_bridge.py` as CHECK 1 → FIX → CHECK 2. `README.md` states the
+Prepare pipeline; the module docstring of `shell_isect_bridge.py` owns the stage
+contract. Yohsai never edits topology or body vertices to satisfy the check.
 
 ## Body contact
 
 Body is a fixed collider. Candidate lookup uses the evaluated world-space Body
 mesh and a 40 mm search radius. A 5 mm contact thickness is applied only in the
-contact path. Each contact correction is capped at 0.20 mm per iteration so an
-initial penetration is removed gradually rather than becoming an impulse.
-Self-contact is absent.
+contact path. A penetrating vertex is projected fully onto the thickness shell;
+a vertex outside the body but inside the shell is corrected by at most the
+thickness per contact pass. Self-contact is absent.
 
 ## Runtime control and fixed values
 
@@ -161,8 +118,8 @@ Self-contact is absent.
 - maximum position correction per projection: 5 mm;
 - Body candidate radius: 40 mm;
 - Body contact thickness: 5 mm;
-- Body contact on penetration: full projection to the thickness shell (no soft
-  cap); outside but inside the shell: up to 5 mm per contact pass (was ~0.2 mm);
+- Body contact on penetration: full projection to the thickness shell; outside
+  but inside the shell: up to the thickness per contact pass;
 - Body contact frequency: every other material iteration, and always the last.
 
 Every value above is `ysc_default_config()` in `native/src/solver.cpp`, except
@@ -173,17 +130,15 @@ Blender-side broad phase (`COLLISION_SEARCH_M`).
 `Zero gravity` advances with no gravitational acceleration. `Normal gravity`
 applies `(0, 0, -9.81)` m/s². Either button can follow the other within the same
 live session without resetting positions, velocities, or seam state. The solver
-is always the native CPU Square-Lattice Cloth library; there is no solver
-selection.
+is always the native Square-Lattice Cloth library; there is no solver selection.
 
 There is no sweep phase after the iteration loop. Each iteration runs seam
 capture, captured seams, quad shear, axial bend, and two alternating edge
 sweeps; Body contact runs on even iterations and the final iteration. Edge
 sweeps run last among the material terms so the strong sewing load converges
 into the lattice and a stitch vertex cannot run ahead and leave a torn
-one-edge spike. OpenMP colouring already propagates corrections across the
-colour diameter of the lattice, so two alternating sweeps replace the older
-four pure-serial hops.
+one-edge spike. OpenMP colouring propagates corrections across the colour
+diameter of the lattice, so two alternating sweeps suffice.
 
 ## Editing and recovery
 
@@ -199,11 +154,11 @@ GRAVITY click clears the independent deformation Lock from all pending parts
 before Sewing, so each pending part is deformable. A successful simulation
 changes every pending participant to `DONE` and does not change its Lock.
 
-State and Lock are separate per-part attributes. Auto is an explicit lock
-operation, not a continuously derived policy. Load turns Auto on and applies it:
-placed and done parts become locked, while pending parts become unlocked.
-Switching Auto off unlocks non-placed parts; switching it on applies the same
-Auto-lock operation again. `Lock` directly changes the selected parts' single
+State and Lock are separate per-part attributes. Existing Lock is an explicit
+lock operation, not a continuously derived policy. Load turns it on and applies
+it: placed and done parts become locked, while pending parts become unlocked.
+Switching it off unlocks non-placed parts; switching it on applies the same
+operation again. Select Lock directly changes the selected parts' single
 deformation Lock. Placed parts remain outside the runtime regardless of Lock.
 Unresolvable paths remain pending. A newly moved part resolves every valid
 connection available among the current participants, including one side of a
