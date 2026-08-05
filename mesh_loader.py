@@ -19,6 +19,9 @@ from mathutils.geometry import barycentric_transform, delaunay_2d_cdt
 # enough that an arm goes in and that the two sides are plainly separate
 # surfaces at rest, small enough that closing it is a short seam.
 RING_OPENING_M = 0.03
+# A RING seam closes one part onto itself, so its label carries the part it
+# belongs to and never matches a group authored in the pattern.
+RING_LABEL_PREFIX = "RING_"
 MESH_SPACING_M = 0.01
 # Small panels keep a finer interior lattice so short pieces still read as cloth.
 # Large panels stay on the 10 mm lattice so tension can propagate without a full
@@ -794,7 +797,7 @@ def _seam_ring(
         raise MeshLoadError("The two RING boundaries must produce matching vertex counts.")
     # Unique to the panel: two sleeves in one garment must not pair with
     # each other, and this seam never crosses to another piece of cloth.
-    label = f"RING_{panel_id}"
+    label = f"{RING_LABEL_PREFIX}{panel_id}"
     new_meta = dict(edge_meta)
     for chain in ring_chains:
         for a, b in zip(chain, chain[1:]):
@@ -1524,16 +1527,75 @@ class _SeamChain:
 
 
 def _sewing_labels(mesh: bpy.types.Mesh) -> set[str]:
+    # A pattern's own groups are single letters, but a RING seam names the part
+    # it closes, so the label is whatever follows the prefix rather than one
+    # character. Anything shorter drops the sleeve seam on the floor.
     labels: set[str] = set()
     for attribute in mesh.attributes:
-        if attribute.name.startswith("sewing_") and len(attribute.name) == len("sewing_A"):
-            label = attribute.name[-1].upper()
-            if label.isascii() and label.isalpha() and attribute.domain == "EDGE":
-                labels.add(label)
+        if not attribute.name.startswith("sewing_") or attribute.domain != "EDGE":
+            continue
+        label = attribute.name[len("sewing_"):]
+        # A sewn mesh also carries sewing_spring_<label>; that is the seam's
+        # springs, not another seam.
+        if label and not label.startswith("spring_"):
+            labels.add(label)
     return labels
 
 
+def _self_closing_partners(obj: bpy.types.Object) -> dict[int, int]:
+    """The vertex pairs a part's own RING seam brings together.
+
+    A sleeve is cut as a C and sewn shut along its two RING edges, so its
+    armhole and its cuff are each a ring the moment that seam exists: the two
+    ends of either one are a single point of the finished garment. The cloth is
+    still an open strip, so nothing reading the mesh alone can see it -- but the
+    seam that closes it is not an assumption, it is a seam this very part
+    carries. Only the ends of the RING edges decide it, so only they are
+    matched.
+    """
+    partners: dict[int, int] = {}
+    for label in sorted(_sewing_labels(obj.data)):
+        if not label.startswith(RING_LABEL_PREFIX):
+            continue
+        chains = _raw_seam_chains(obj, label)
+        if len(chains) != 2 or any(chain.closed for chain in chains):
+            continue
+        left, right = chains
+        forward = _direction_cost(left, right, False)
+        reverse = _direction_cost(left, right, True)
+        if abs(forward - reverse) <= 1.0e-6:
+            continue
+        if reverse < forward:
+            ends = ((left.vertices[0], right.vertices[-1]), (left.vertices[-1], right.vertices[0]))
+        else:
+            ends = ((left.vertices[0], right.vertices[0]), (left.vertices[-1], right.vertices[-1]))
+        for a, b in ends:
+            partners[a] = b
+            partners[b] = a
+    return partners
+
+
 def _seam_chains(obj: bpy.types.Object, label: str) -> list[_SeamChain]:
+    chains = _raw_seam_chains(obj, label)
+    if label.startswith(RING_LABEL_PREFIX):
+        return chains
+    partners = _self_closing_partners(obj)
+    if not partners:
+        return chains
+    return [_closed_by_own_seam(chain, partners) for chain in chains]
+
+
+def _closed_by_own_seam(chain: _SeamChain, partners: dict[int, int]) -> _SeamChain:
+    if chain.closed or partners.get(chain.vertices[0]) != chain.vertices[-1]:
+        return chain
+    # Closing costs no length: the two ends are one point once the RING seam is
+    # sewn, the same virtual join a composite body loop already uses.
+    return _SeamChain(
+        chain.obj, chain.vertices, chain.world_points, chain.edge_lengths + (0.0,), True
+    )
+
+
+def _raw_seam_chains(obj: bpy.types.Object, label: str) -> list[_SeamChain]:
     mesh = obj.data
     attribute = mesh.attributes.get(f"sewing_{label}")
     if attribute is None or attribute.domain != "EDGE":

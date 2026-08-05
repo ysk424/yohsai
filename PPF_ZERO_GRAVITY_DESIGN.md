@@ -1,6 +1,8 @@
 # Zero GRAVITY: sewing with the ZOZO Contact Solver
 
-Status: in progress. The body panels sew; the sleeves do not yet.
+Status: in progress. Every seam of the reference garment now resolves into
+springs -- body, armholes, neckline and the three RING seams. Reading the solved
+cloth back is what is still wrong.
 
 Zero GRAVITY closes every seam of a garment. It is the one step where the
 square-lattice solver could not be made faster without being made worse:
@@ -79,20 +81,33 @@ built as a C so an arm still goes in. Cloth does not stretch to allow that, so
 the curve widens rather than the cloth opening: `radius * 2*pi - gap ==
 circumference` keeps the arc exactly the pattern's width.
 
+A RING seam names the part it closes — `RING_SODE:LEFT`, not a pattern letter —
+because two sleeves must not pair with each other. Labels are therefore whatever
+follows `sewing_` on the mesh, not one character; reading only one character is
+what made the sleeve seam invisible to everything downstream of the mesh
+builder.
+
+## A ring left open is still a ring
+
+Cutting the sleeve as a C took away something the weld used to say for free.
+An armhole and a cuff are rings, and the code that sews them says so through
+`_SeamChain.closed`: a closed sleeve armhole tells the seam-count equaliser what
+vertex budget the body armhole has to match, tells `_multipart_closed_pairs` to
+align a loop against a loop, and tells the body-only step that the front and
+back armholes are partners of the sleeve rather than of each other. An open
+strip of cloth says none of that, so opening the sleeve broke all three at once
+— including panels the sleeve is not sewn to, whose armholes got recut from a
+budget that no longer existed, and the front and back armholes then sewed to
+each other and collided with the shoulder and side seams.
+
+So `_self_closing_partners` reads the part's own RING seam and matches its two
+edges' ends. Any chain running between a matched pair is closed by that seam, and
+is marked closed with a zero-length join — the same virtual join a composite body
+loop already uses, because after sewing the two ends are one point. This asserts
+nothing: the seam that closes the ring is a seam the part carries. The collar is
+a RING panel too, so its neckline closes the same way.
+
 ## What is not finished
-
-**The C sleeve's armhole is an open chain, and that recut the body panels.**
-The seam-count equaliser sizes the body armhole from the sleeve ring's vertex
-budget, so opening the sleeve changed panels the sleeve is not sewn to: the
-front panel went from 4109 vertices to 2903, and the body-only sewing step broke
-with mismatched chains. The fix is to treat the C's armhole as a closed ring for
-counting and pairing while leaving the geometry open. That is not a staging
-compromise — the ring is closed by a seam known to exist, so calling it a ring
-states a fact rather than assuming one.
-
-**The RING label does not reach the mesh.** `_seam_ring` writes
-`RING_<panel>:<side>` into the edge metadata, but it does not appear in the
-mesh's sewing attributes, so the sleeve seam does not exist downstream.
 
 **`ppf_remesh.transfer` is wrong.** Locating an original vertex in a rebuilt
 panel returns 0.156 mm of error at the median and kilometres at the worst.
