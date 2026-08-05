@@ -110,21 +110,30 @@ a RING panel too, so its neckline closes the same way.
 
 ## What is not finished
 
-**The sleeve press is rejected before it starts.** With the body already sewn
-and the sleeves released, scene build fails with
-`frontend._scene_.ValidationError: 343 self-intersections (343 tri-tri)`. That
-is the input being refused, not the solve going wrong. It also puts a limit on
-the "panels are cut flat" promise above: it holds for the first press, but a
-staged workflow hands the second press cloth that is already draped, and the
-flat sleeve panels stand at the shoulders passing through it. Whether the 343
-are sleeve-against-body or the settled body against itself is not yet measured,
-and that measurement is the next step.
+**The cloth that comes back is not the cloth that was solved.** The sewn back
+panel passes through the Body. A barrier solver cannot produce that — staying
+out of a static collider is the one thing it guarantees — so the positions
+written into Blender are not the positions the solver computed. The
+intersection-free, 0.013 mm-residual result measured earlier was measured on the
+solver's own mesh, which is exactly what "the solve is fine, the read-back is
+wrong" looks like.
 
-**`ppf_remesh.transfer` is wrong.** Locating an original vertex in a rebuilt
-panel returns 0.156 mm of error at the median and kilometres at the worst.
-Welded tubes were the suspected cause and the weld is now gone, but that is
-unproven. Until it is, `ppf_zero_gravity` discards any result that moves cloth
-further than the Body and leaves the cloth untouched.
+That makes `ppf_remesh.transfer` the suspect: locating an original vertex in a
+rebuilt panel returns 0.156 mm of error at the median and kilometres at the
+worst. `ppf_zero_gravity` discards any result that moves cloth further than the
+Body, which catches the kilometres and lets a few centimetres through — and a
+few centimetres is enough to put cloth inside a mannequin.
+
+It also explains the failure that looked like a sleeve problem. Releasing the
+sleeves and pressing again is refused at scene build with
+`frontend._scene_.ValidationError: 343 self-intersections (343 tri-tri)`. A
+sleeve at that moment is still a flat cut panel and a flat panel cannot
+intersect itself, so the second press is most likely being handed body panels
+this add-on corrupted, and refused for them. Not yet measured: which pairs of
+triangles the 343 are. That measurement decides it, and it is the first job.
+
+If the triangulation is fixed where it is produced, `ppf_remesh` should be
+deleted rather than repaired, and this goes with it.
 
 `ppf_remesh` exists because Yohsai's panel triangulation leaves needle slivers
 in the interior — the shortest interior edge measures 0.169 um against a 10 mm
