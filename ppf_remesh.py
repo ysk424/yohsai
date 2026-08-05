@@ -67,31 +67,45 @@ def _boundary_loops(faces: np.ndarray) -> list[list[int]]:
     loops, so the even-odd test below can treat holes as holes.
     """
     used: dict[tuple[int, int], int] = defaultdict(int)
-    directed: dict[int, int] = {}
     for a, b, c in faces:
         for start, end in ((a, b), (b, c), (c, a)):
             used[(min(start, end), max(start, end))] += 1
+
+    # A vertex can leave along more than one boundary edge: a panel pinched
+    # to a point -- the tip of a sleeve taper, a dart closed to nothing --
+    # visits it once per loop that passes through. Keying a single successor
+    # per vertex drops all but the last, and the walk below then arrives at a
+    # vertex with nowhere to go and reports an outline that does not close.
+    outgoing: dict[int, list[int]] = defaultdict(list)
     for a, b, c in faces:
         for start, end in ((a, b), (b, c), (c, a)):
             if used[(min(start, end), max(start, end))] == 1:
-                directed[int(start)] = int(end)
+                outgoing[int(start)].append(int(end))
 
     loops: list[list[int]] = []
-    remaining = dict(directed)
-    while remaining:
-        start = next(iter(remaining))
+    while outgoing:
+        start = next(iter(outgoing))
         loop = [start]
-        node = remaining.pop(start)
+        node = _take(outgoing, start)
         while node != start:
             loop.append(node)
-            if node not in remaining:
+            if node not in outgoing:
                 raise RemeshError("A panel outline does not close.")
-            node = remaining.pop(node)
+            node = _take(outgoing, node)
         if len(loop) >= 3:
             loops.append(loop)
     if not loops:
         raise RemeshError("A panel has no outline.")
     return loops
+
+
+def _take(outgoing: dict[int, list[int]], node: int) -> int:
+    """Consume one outgoing boundary edge, dropping the vertex when spent."""
+    successors = outgoing[node]
+    end = successors.pop()
+    if not successors:
+        del outgoing[node]
+    return end
 
 
 def _plane_basis(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
