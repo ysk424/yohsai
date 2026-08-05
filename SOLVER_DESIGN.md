@@ -2,6 +2,10 @@
 
 Status: current native runtime contract
 
+This document covers the native square-lattice runtime, which Normal GRAVITY
+uses. Zero GRAVITY does not use it: it sews with the ZOZO Contact Solver in a
+separate process, described in `ppf_zero_gravity.py`.
+
 The runtime is a Body-independent square-lattice cloth solver with a version-9
 C ABI (`YSC_API_VERSION` in `c_api.h`, matched by `API_VERSION` in
 `native_solver.py`; a mismatch refuses to load).

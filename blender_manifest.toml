@@ -30,6 +30,8 @@ paths = [
     "ui.py",
     "i18n.py",
     "kitsuke.py",
+    "ppf_zero_gravity.py",
+    "ppf_driver.py",
     "zozo_handoff.py",
     "zozo_mcp_client.py",
     "shell_isect_bridge.py",

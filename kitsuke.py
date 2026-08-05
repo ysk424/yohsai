@@ -30,13 +30,9 @@ from .mesh_loader import (
 
 STEPS_PER_CLICK = 8
 SOLVER_ITERATIONS = 16
-# Zero GRAVITY does more material work per click so one press advances further
-# relative to Blender mesh read/write overhead (round-trip cost is fixed).
-ZERO_GRAVITY_SOLVER_ITERATIONS = 24  # 1.5x SOLVER_ITERATIONS
 MIN_SOLVER_ITERATIONS = 1
 MAX_SOLVER_ITERATIONS = 128
 COLLISION_SEARCH_M = 0.04
-ZERO_GRAVITY_M_PER_SECOND_SQUARED = 0.0
 NORMAL_GRAVITY_M_PER_SECOND_SQUARED = 9.81
 
 _STATE_EPOCH_KEY = "yohsai_kitsuke_epoch"

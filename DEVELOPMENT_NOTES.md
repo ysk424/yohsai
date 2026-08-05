@@ -22,14 +22,24 @@ Status: current development state
   by bending out of plane, not by letting a span collapse.
 - Body participates only through contact correction, which dissipates only.
 - Self-contact and Body-relative rest-shape forces are absent.
-- Zero gravity and Normal gravity select 0 or 9.81 m/s² per click in world -Z.
+- Normal GRAVITY advances one interval at 9.81 m/s² in world -Z.
+- Zero GRAVITY does not advance an interval. It closes every seam in one
+  ZOZO Contact Solver job (`ppf_zero_gravity.py` -> `ppf_driver.py`), run as a
+  child process in the solver's own tree so its CUDA backend stays out of
+  Blender. The Body goes over as a static collider and the panels start flat,
+  which is what makes the scene intersection-free at the start and the step
+  cost small. A press sews from flat, so pressing again re-sews rather than
+  advancing.
 - Existing Lock is event-driven. Load and turning it on lock PLACED/DONE and
   unlock PENDING; turning it off unlocks non-placed parts. Select Lock is a
   button that toggles Lock on the selection. Both may be off; both must not be
   on. GRAVITY completion never changes Lock by itself.
-- The product path always uses the native Square-Lattice solver. Normal GRAVITY
-  uses 16 material iterations; Zero GRAVITY uses 24 (1.5x) so one press does
-  more settle work relative to fixed Blender mesh round-trip cost.
+- Normal GRAVITY uses the native Square-Lattice solver at 16 material
+  iterations. Zero GRAVITY uses the ZOZO Contact Solver instead, because
+  closing a seam by positional projection ties stiffness to the iteration
+  count, so buying speed there costs correctness; an implicit seam force
+  solved inside a Newton step gives the converged answer at any step count.
+  It costs wall clock rather than accuracy: a press is a few-second job.
 - When built with CUDA (`YSC_ENABLE_CUDA`), coloured material projections can
   run on the GPU (sm_89/sm_120). Auto-select uses CUDA when edge count ≥ 20k;
   smaller meshes stay on OpenMP. Override with env `YSC_FORCE_MATERIAL=cuda|cpu`.

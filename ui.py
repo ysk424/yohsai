@@ -20,8 +20,6 @@ from .kitsuke import (
     KitsukeError,
     NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
     SOLVER_ITERATIONS,
-    ZERO_GRAVITY_M_PER_SECOND_SQUARED,
-    ZERO_GRAVITY_SOLVER_ITERATIONS,
     adapt_seam_counts,
     advance_kitsuke,
     clear_kitsuke_session,
@@ -29,6 +27,7 @@ from .kitsuke import (
     has_kitsuke_session,
     reset_runtime_epoch,
 )
+from .ppf_zero_gravity import SETTLE_FRAMES, SEWING_FRAMES, sew_zero_gravity
 from .mesh_loader import (
     LOCKED_OBJECT_KEY,
     apply_auto_lock,
@@ -684,6 +683,38 @@ class YOHSAI_OT_update_svg(Operator):
         return {"FINISHED"}
 
 
+def _prepare_gravity(context, collection) -> tuple[Object, ...]:
+    """Bring seams and the Sewing plan up to date before a solver runs.
+
+    Both GRAVITY buttons need the same starting state, so this is shared;
+    only the solve that follows differs.
+    """
+    # Gather seams: recut any sewing seam whose two sides carry unequal
+    # vertex counts so they can pair 1:1.  This changes topology on the
+    # affected panels, so force a sewing rebuild below.
+    if adapt_seam_counts(context, collection):
+        collection["yohsai_sewing_verified"] = False
+
+    pending_parts = mark_moved_parts_pending(collection)
+    sewing_required = bool(pending_parts) or (
+        not has_kitsuke_session(collection)
+        and not bool(collection.get("yohsai_sewing_verified", False))
+    )
+    if sewing_required:
+        if not pending_parts and len(participating_parts(collection)) < 2:
+            raise KitsukeError("Move at least two connected pattern parts before pressing GRAVITY.")
+        # Each new pending stage gets sewing connections from its current
+        # Object Mode placement.  Completed parts remain in the plan as
+        # locked anchors when Auto is on.  A changed Update signature also
+        # rebuilds from completed participants so the hidden Sewing action
+        # is never required for recovery.
+        clear_kitsuke_session(collection)
+        remove_sewn_preview(collection, reveal_parts=True)
+        collection["yohsai_sewing_verified"] = False
+        create_sewn_mesh(context, collection)
+    return pending_parts
+
+
 def _run_gravity(
     operator: Operator,
     context,
@@ -699,30 +730,7 @@ def _run_gravity(
         if props.body_object is None:
             raise KitsukeError("Select a mesh Body before pressing GRAVITY.")
 
-        # Gather seams: recut any sewing seam whose two sides carry unequal
-        # vertex counts so they can pair 1:1.  This changes topology on the
-        # affected panels, so force a sewing rebuild below.
-        if adapt_seam_counts(context, collection):
-            collection["yohsai_sewing_verified"] = False
-
-        pending_parts = mark_moved_parts_pending(collection)
-        sewing_required = bool(pending_parts) or (
-            not has_kitsuke_session(collection)
-            and not bool(collection.get("yohsai_sewing_verified", False))
-        )
-        if sewing_required:
-            if not pending_parts and len(participating_parts(collection)) < 2:
-                raise KitsukeError("Move at least two connected pattern parts before pressing GRAVITY.")
-            # Each new pending stage gets sewing connections from its current
-            # Object Mode placement.  Completed parts remain in the plan as
-            # locked anchors when Auto is on.  A changed Update signature also
-            # rebuilds from completed participants so the hidden Sewing action
-            # is never required for recovery.
-            clear_kitsuke_session(collection)
-            remove_sewn_preview(collection, reveal_parts=True)
-            collection["yohsai_sewing_verified"] = False
-            create_sewn_mesh(context, collection)
-
+        pending_parts = _prepare_gravity(context, collection)
         message = advance_kitsuke(
             context,
             collection,
@@ -741,12 +749,45 @@ def _run_gravity(
     return {"FINISHED"}
 
 
+def _run_zero_gravity(operator: Operator, context):
+    """Sew every seam in one contact-solver job.
+
+    The square-lattice session is dropped first: it holds cloth state this
+    solve replaces wholesale, and keeping a stale one would let the next
+    Normal GRAVITY press continue from cloth it never simulated.
+    """
+    props = context.scene.yohsai
+    collection = props.clothes_collection
+    pending_parts: tuple[Object, ...] = ()
+    try:
+        if collection is None or collection.get("yohsai_role") != "clothes":
+            raise KitsukeError("No loaded Yohsai clothes collection is selected.")
+        if props.body_object is None:
+            raise KitsukeError("Select a mesh Body before pressing Zero GRAVITY.")
+
+        pending_parts = _prepare_gravity(context, collection)
+        clear_kitsuke_session(collection)
+        remove_sewn_preview(collection, reveal_parts=True)
+        message = sew_zero_gravity(context, collection, props.body_object)
+        mark_pending_parts_done(pending_parts)
+    except Exception as exc:
+        message = str(exc).strip() or type(exc).__name__
+        props.parse_status = f"Zero GRAVITY failed: {message[:240]}"
+        operator.report({"ERROR"}, message)
+        return {"CANCELLED"}
+    props.parse_status = message
+    operator.report({"INFO"}, message)
+    return {"FINISHED"}
+
+
 class YOHSAI_OT_kitsuke_zero_gravity(Operator):
     bl_idname = "yohsai.kitsuke_zero_gravity"
     bl_label = "Zero GRAVITY"
     bl_description = (
-        "Run automatic Sewing, then advance without gravity "
-        f"({ZERO_GRAVITY_SOLVER_ITERATIONS} material iterations, 1.5x Normal)"
+        "Run automatic Sewing, then close every seam with the ZOZO Contact "
+        f"Solver in one job ({SEWING_FRAMES} frames sewing, {SETTLE_FRAMES} "
+        "settling; no gravity, static Body). Takes seconds, not a frame. "
+        "Sews from the flat panels, so pressing it again re-sews"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -755,12 +796,7 @@ class YOHSAI_OT_kitsuke_zero_gravity(Operator):
         return context.mode == "OBJECT"
 
     def execute(self, context):
-        return _run_gravity(
-            self,
-            context,
-            ZERO_GRAVITY_M_PER_SECOND_SQUARED,
-            ZERO_GRAVITY_SOLVER_ITERATIONS,
-        )
+        return _run_zero_gravity(self, context)
 
 
 class YOHSAI_OT_kitsuke(Operator):
