@@ -288,8 +288,14 @@ def _cloth_topology(parts: list[_PartRange]) -> _ClothTopology:
                 continue
             a, b = (int(value) for value in edge.vertices)
             rest_length = float(local_rest[edge.index])
+            # Attribute default is 0 when Load left a hole; recover from pattern.
             if not rest_length > 1.0e-8:
-                raise KitsukeError(f"{part.obj.name} contains a zero-length material edge.")
+                rest_length = float(np.linalg.norm(pattern[a] - pattern[b]))
+            if not rest_length > 1.0e-8:
+                # True degenerate edge (pattern distance also ~0): no stretch spring.
+                # Skipping avoids aborting the whole GRAVITY session (common on
+                # CDT slivers / unset rest after validate).
+                continue
             edges.append((part.start + a, part.start + b))
             edge_rest_lengths.append(rest_length)
             if family in (GRAINLINE_EDGE_WARP, GRAINLINE_EDGE_WEFT):

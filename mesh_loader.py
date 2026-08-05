@@ -1157,12 +1157,23 @@ def _write_panel_mesh_attributes(
         _set_boolean_edge_attribute(mesh, f"sewing_{label}", indices)
     _set_boolean_edge_attribute(mesh, "fold", fold_edges)
 
+    # Every mesh edge must get a rest length. Blender FLOAT attributes default
+    # to 0; leaving holes makes GRAVITY report "zero-length material edge" on
+    # non-proxy edges that were never written (e.g. edges only from faces after
+    # validate/calc_edges).
     rest_attribute = mesh.attributes.new(name="yohsai_pattern_edge_rest", type="FLOAT", domain="EDGE")
-    for key, value in panel.edge_rest.items():
-        edge_index = mesh_edge_lookup.get(key)
-        if edge_index is None:
-            raise MeshLoadError("A pattern rest edge was lost while creating the Blender mesh.")
-        rest_attribute.data[edge_index].value = value
+    pattern_points = panel.pattern_vertices
+    for edge in mesh.edges:
+        key = _edge_key(*edge.vertices)
+        if key in panel.edge_rest:
+            value = float(panel.edge_rest[key])
+        else:
+            a, b = (int(v) for v in edge.vertices)
+            if 0 <= a < len(pattern_points) and 0 <= b < len(pattern_points):
+                value = float((pattern_points[a] - pattern_points[b]).length)
+            else:
+                value = 0.0
+        rest_attribute.data[edge.index].value = value
 
     family_attribute = mesh.attributes.new(
         name=GRAINLINE_EDGE_FAMILY_ATTRIBUTE, type="INT", domain="EDGE"
