@@ -982,8 +982,9 @@ void Solver::project_body_contacts_external(const int32_t* candidates, int32_t c
 }
 
 int32_t Solver::gather_body_contacts_auto() {
-    // One nearest body face per cloth vertex: AABB pad + radius query, with an
-    // unlimited nearest query for vertices that are inside the AABB.
+    // One nearest body face per cloth vertex within the contact search radius.
+    // No unlimited (infinite-radius) query: deep interior points that miss the
+    // radius are left alone until they re-enter the shell band.
     constexpr float kCollisionSearchM = 0.04F;
     const float search = std::max(config_.contact_thickness, kCollisionSearchM);
     const float pad = search + 1.0e-6F;
@@ -1007,27 +1008,8 @@ int32_t Solver::gather_body_contacts_auto() {
         }
         int32_t face_index = -1;
         float distance = 0.0F;
-        bool found = body_bvh_.nearest_face(vertex.position, search, &face_index, &distance);
-        if (!found) {
-            // Penetrating or deep vertices: unlimited nearest if still in AABB.
-            found = body_bvh_.nearest_face(
-                vertex.position,
-                std::numeric_limits<float>::infinity(),
-                &face_index,
-                &distance);
-            if (!found) {
-                continue;
-            }
-            const Face& face = body_faces_[static_cast<size_t>(face_index)];
-            const Vec3& a = body_positions_[static_cast<size_t>(face[0])];
-            const Vec3& b = body_positions_[static_cast<size_t>(face[1])];
-            const Vec3& c = body_positions_[static_cast<size_t>(face[2])];
-            const Vec3 normal = normalized(cross(b - a, c - a));
-            const Vec3 closest = closest_triangle_point(vertex.position, a, b, c);
-            const float signed_distance = dot(vertex.position - closest, normal);
-            if (signed_distance >= config_.contact_thickness && distance > search) {
-                continue;
-            }
+        if (!body_bvh_.nearest_face(vertex.position, search, &face_index, &distance)) {
+            continue;
         }
         contact_face_[static_cast<size_t>(index)] = face_index;
         ++candidate_count;

@@ -214,7 +214,6 @@ __global__ void gather_kernel(
     const int32_t* locked,
     int32_t vertex_count,
     float search,
-    float thickness,
     float pad,
     float body_bmin_x,
     float body_bmin_y,
@@ -226,7 +225,6 @@ __global__ void gather_kernel(
     int32_t node_count,
     const int32_t* leaves,
     const BodyBvh::GpuFace* faces,
-    const float* face_tri,
     int32_t face_count,
     int32_t* contact_face,
     int32_t* candidate_count) {
@@ -244,31 +242,12 @@ __global__ void gather_kernel(
     if (!contains_expanded(point, bmin, bmax, pad)) {
         return;
     }
+    // Bounded search only (same contract as host). No infinite-radius fallback.
     int32_t face_index = -1;
     float distance = 0.0F;
-    bool found = nearest_face(
-        point, search, nodes, node_count, leaves, faces, &face_index, &distance);
-    if (!found) {
-        found = nearest_face(
-            point,
-            1.0e30F,
-            nodes,
-            node_count,
-            leaves,
-            faces,
-            &face_index,
-            &distance);
-        if (!found || face_index < 0 || face_index >= face_count) {
-            return;
-        }
-        float3 a, b, c;
-        load_face_tri(face_tri, face_index, a, b, c);
-        const float3 normal = normalized3(cross3(b - a, c - a));
-        const float3 closest = closest_triangle_point(point, a, b, c);
-        const float signed_distance = dot3(point - closest, normal);
-        if (signed_distance >= thickness && distance > search) {
-            return;
-        }
+    if (!nearest_face(
+            point, search, nodes, node_count, leaves, faces, &face_index, &distance)) {
+        return;
     }
     if (face_index < 0 || face_index >= face_count) {
         return;
@@ -495,7 +474,6 @@ int32_t BodyContactCuda::project(
             locked,
             vertex_count_,
             search,
-            contact_thickness,
             pad,
             bounds_min_[0],
             bounds_min_[1],
@@ -507,7 +485,6 @@ int32_t BodyContactCuda::project(
             node_count_,
             d_leaves_,
             d_bvh_faces_,
-            d_face_tri_,
             face_count_,
             d_contact_face_,
             d_candidate_count_);
