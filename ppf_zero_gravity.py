@@ -344,8 +344,25 @@ def _failure_message(completed: subprocess.CompletedProcess) -> str:
     Its messages are the only ground truth about why a shell was refused,
     so the last meaningful line is worth more here than the exit code.
     """
+    # The solver draws progress bars on the same stream, and they arrive after
+    # the traceback, so the last line is usually "build scene: 92%" and says
+    # nothing. Prefer the last line that reads like a diagnosis.
     for stream in (completed.stderr, completed.stdout):
         lines = [line.strip() for line in (stream or "").splitlines() if line.strip()]
+        informative = [
+            line
+            for line in lines
+            if ("Error" in line or "error" in line or "FATAL" in line)
+            and "%|" not in line
+        ]
+        if informative:
+            return f"The ZOZO solver failed: {informative[-1]}"
+    for stream in (completed.stderr, completed.stdout):
+        lines = [
+            line.strip()
+            for line in (stream or "").splitlines()
+            if line.strip() and "%|" not in line
+        ]
         if lines:
             return f"The ZOZO solver failed: {lines[-1]}"
     return f"The ZOZO solver failed with exit code {completed.returncode}."
