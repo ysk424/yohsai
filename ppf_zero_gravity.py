@@ -272,7 +272,12 @@ def sew_zero_gravity(
         "air_drag": AIR_DRAG,
     }
 
-    with tempfile.TemporaryDirectory(prefix="yohsai_ppf_") as workspace:
+    # Cleaning up scratch files must never discard a finished solve, so the
+    # directory is removed on a best-effort basis: a lingering handle here
+    # would otherwise throw away half a minute of work over a temp file.
+    with tempfile.TemporaryDirectory(
+        prefix="yohsai_ppf_", ignore_cleanup_errors=True
+    ) as workspace:
         input_path = os.path.join(workspace, "scene.npz")
         output_path = os.path.join(workspace, "sewn.npz")
         np.savez(
@@ -301,9 +306,11 @@ def sew_zero_gravity(
         )
         if completed.returncode != 0 or not os.path.isfile(output_path):
             raise KitsukeError(_failure_message(completed))
-        result = np.load(output_path)
-        sewn = np.asarray(result["cloth_vertices"], dtype=np.float64)
-        report = json.loads(str(result["report"]))
+        # np.load on an npz is lazy and holds the file open, which on
+        # Windows blocks the directory from being removed. Close it here.
+        with np.load(output_path) as result:
+            sewn = np.asarray(result["cloth_vertices"], dtype=np.float64)
+            report = json.loads(str(result["report"]))
 
     if sewn.shape != positions.shape:
         raise KitsukeError(
