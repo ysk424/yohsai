@@ -330,6 +330,28 @@ void Solver::init_body_contact_cuda() {
     if (!BodyContactCuda::device_available() || body_bvh_.empty()) {
         return;
     }
+    // Opt-in only. Default OpenMP host BVH: CUDA contact can leave the host in
+    // cudaDeviceSynchronize with CPU idle and the GPU barely active if a
+    // kernel stalls. Set YSC_CUDA_CONTACT=1 to enable the device path.
+    bool enable = false;
+#if defined(_MSC_VER)
+    char* flag = nullptr;
+    size_t flag_len = 0;
+    if (_dupenv_s(&flag, &flag_len, "YSC_CUDA_CONTACT") == 0 && flag != nullptr) {
+        enable = (std::strcmp(flag, "1") == 0 || std::strcmp(flag, "true") == 0 ||
+                  std::strcmp(flag, "on") == 0);
+        free(flag);
+    }
+#else
+    const char* flag = std::getenv("YSC_CUDA_CONTACT");
+    if (flag != nullptr) {
+        enable = (std::strcmp(flag, "1") == 0 || std::strcmp(flag, "true") == 0 ||
+                  std::strcmp(flag, "on") == 0);
+    }
+#endif
+    if (!enable) {
+        return;
+    }
     // Reuse the same host pack buffers material CUDA may have allocated.
     if (cuda_pos_pack_.size() != vertices_.size() * 3) {
         cuda_pos_pack_.resize(vertices_.size() * 3);

@@ -133,9 +133,16 @@ public:
         int32_t best_face = -1;
         int32_t stack[64];
         int32_t stack_size = 0;
+        const int32_t node_count = static_cast<int32_t>(nodes_.size());
+        const int32_t max_visits = node_count * 2 + 16;
+        int32_t visits = 0;
         stack[stack_size++] = 0;
-        while (stack_size > 0) {
+        while (stack_size > 0 && visits < max_visits) {
+            ++visits;
             const int32_t node_index = stack[--stack_size];
+            if (node_index < 0 || node_index >= node_count) {
+                continue;
+            }
             const Node& node = nodes_[static_cast<size_t>(node_index)];
             if (aabb_distance(point, node.bmin, node.bmax) > best_distance) {
                 continue;
@@ -151,6 +158,10 @@ public:
                     }
                 }
             } else {
+                if (node.left < 0 || node.left >= node_count || node.right < 0 ||
+                    node.right >= node_count) {
+                    continue;
+                }
                 // Visit nearer child first for better pruning.
                 const float left_distance =
                     aabb_distance(point, nodes_[static_cast<size_t>(node.left)].bmin, nodes_[static_cast<size_t>(node.left)].bmax);

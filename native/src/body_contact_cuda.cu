@@ -148,8 +148,14 @@ __device__ bool nearest_face(
     int32_t best_face = -1;
     int32_t stack[64];
     int stack_size = 0;
+    // Hard cap: a correct tree visits each node at most a few times. Without
+    // this a corrupt child index or cycle can spin the GPU forever while the
+    // host sits in cudaDeviceSynchronize (CPU idle, GPU "a little busy").
+    const int max_visits = node_count * 2 + 16;
+    int visits = 0;
     stack[stack_size++] = 0;
-    while (stack_size > 0) {
+    while (stack_size > 0 && visits < max_visits) {
+        ++visits;
         const int32_t node_index = stack[--stack_size];
         if (node_index < 0 || node_index >= node_count) {
             continue;
@@ -173,6 +179,10 @@ __device__ bool nearest_face(
                 }
             }
         } else {
+            if (node.left < 0 || node.left >= node_count || node.right < 0 ||
+                node.right >= node_count) {
+                continue;
+            }
             const float left_distance =
                 aabb_distance(point, nodes[node.left].bmin, nodes[node.left].bmax);
             const float right_distance =
