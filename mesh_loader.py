@@ -1005,7 +1005,10 @@ def _triangulate_panel(
             vertex_kinds,
             shortenable_edges,
         ) = _seam_ring(
-            panel_id,
+            # Mirrored sleeves are two instances of one cut and share a panel
+            # id. Left and right must not become each other's seam, so the
+            # label carries the side as well.
+            f"{panel_id}:{mirror_side}" if mirror_side else panel_id,
             pattern_vertices,
             construction_vertices,
             result_edges,
