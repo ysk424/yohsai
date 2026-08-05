@@ -192,12 +192,15 @@ def _triangulate(
     faces = simplices[keep]
     if not len(faces):
         raise RemeshError("A panel produced no triangles inside its outline.")
+    # A vertex in a sharp concave notch -- a sleeve tapering to its underarm,
+    # a corner cut back on itself -- can have every incident triangle fall
+    # outside the outline, so it ends up in none of them. That is not worth
+    # failing over: `transfer` reads any original vertex out of the clean mesh
+    # by interpolation, so such a vertex simply rides its neighbours like an
+    # interior one. Report which they are; `remap_seams` refuses the only case
+    # that genuinely needs an exact vertex.
     orphaned = np.setdiff1d(np.arange(len(boundary)), faces)
-    if len(orphaned):
-        raise RemeshError(
-            f"{len(orphaned)} outline vertices ended up in no triangle."
-        )
-    return points, faces
+    return points, faces, orphaned
 
 
 def rebuild(vertices: np.ndarray, faces: np.ndarray) -> dict:
@@ -231,13 +234,17 @@ def rebuild(vertices: np.ndarray, faces: np.ndarray) -> dict:
 
         spacing = _panel_spacing(vertices, panel_faces)
         interior = _interior_points(loops, spacing)
-        points, panel_clean_faces = _triangulate(
+        points, panel_clean_faces, orphaned = _triangulate(
             flat[boundary_indices], interior, loops, spacing
         )
 
         clean_vertices.append(origin + points @ basis.T)
         clean_faces.append(panel_clean_faces + total)
         kept[boundary_indices] = np.arange(len(boundary_indices)) + total
+        # An outline vertex in no triangle is not a usable seam anchor, so it
+        # goes back to being recovered by interpolation like an interior one.
+        if len(orphaned):
+            kept[boundary_indices[orphaned]] = -1
         panels.append(
             {
                 "original": panel_vertices,
@@ -282,7 +289,8 @@ def remap_seams(seams: np.ndarray, kept: np.ndarray) -> np.ndarray:
     if (mapped < 0).any():
         missing = int((mapped < 0).any(axis=1).sum())
         raise RemeshError(
-            f"{missing} seam pairs reference a vertex that is not on a panel outline."
+            f"{missing} seam pairs anchor on a vertex the rebuilt panel does not "
+            "carry, so those seams could not be sewn."
         )
     return mapped
 
