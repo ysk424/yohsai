@@ -42,6 +42,7 @@ paths = [
     "SVG_TO_JSON_SPEC.md",
     "KITSUKE_DESIGN.md",
     "SOLVER_DESIGN.md",
+    "PPF_ZERO_GRAVITY_DESIGN.md",
     "GRAINLINE_DESIGN.md",
     "SEAM_BOUNDARY_LAYER_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",
