@@ -31,6 +31,7 @@ import numpy as np
 # usual script-directory entry, so a sibling import needs saying explicitly.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import ppf_clear  # noqa: E402
 import ppf_remesh  # noqa: E402
 
 
@@ -89,8 +90,14 @@ def run(input_path: str, output_path: str) -> dict:
     # its outline, so the seams and the cut are untouched.
     cloth_pattern = np.ascontiguousarray(data["cloth_pattern"], dtype=np.float64)
     rebuilt = ppf_remesh.rebuild(cloth_vertices, cloth_faces, cloth_pattern)
-    solve_vertices = rebuilt["vertices"]
     solve_faces = rebuilt["faces"]
+    # Rebuilding curved cloth chords inside its own surface, and against a Body
+    # the cloth already rests on that is inside the Body. An intersection-free
+    # scene is what the solver's guarantee is built on, so what the rebuild
+    # pushed in is put back before the scene is.
+    solve_vertices, clearance = ppf_clear.clear_body(
+        rebuilt["vertices"], solve_faces, body_vertices, body_faces
+    )
     solve_seams = ppf_remesh.remap_seams(seam_pairs, rebuilt["kept"])
     solve_locked = np.zeros(len(solve_vertices), dtype=np.int64)
     locked_clean = rebuilt["kept"][np.flatnonzero(locked)]
@@ -166,6 +173,15 @@ def run(input_path: str, output_path: str) -> dict:
         os.path.join(output_dir, f"vert_{frame}.bin"), dtype=np.float32
     ).reshape(-1, 3)
     # The solve ran on the clean mesh; put the caller's own vertices back.
+    #
+    # Reading the *motion* back instead -- interpolating where the solve
+    # started as well as where it ended, and moving the original cloth by the
+    # difference -- looks better and measures far worse: 1268 tri-tri pairs
+    # against the Body where reading positions gives 14. The solve rests the
+    # clean surface against the Body at the contact gap, and the original
+    # mesh's own departure from that surface then pokes straight through it.
+    # Interpolating positions hands back the surface the solver actually
+    # guaranteed, which is the one that clears the Body.
     solved = positions[to_global].astype(np.float64)
     sewn = ppf_remesh.transfer(rebuilt, solved, len(cloth_vertices))
 
@@ -186,6 +202,10 @@ def run(input_path: str, output_path: str) -> dict:
         "cloth_vertices_in": int(len(cloth_vertices)),
         "cloth_vertices_solved": int(len(solve_vertices)),
         "cloth_faces_solved": int(len(solve_faces)),
+        # What the rebuild had to be lifted out of the Body by, which is a
+        # measure of how far the rebuilt surface strayed from the cloth.
+        "cleared_vertices": clearance["lifted"],
+        "cleared_max_mm": clearance["lifted_max_mm"],
         "sew_frames": sew_frames,
         "settle_frames": settle_frames,
         "frames_requested": frames,
