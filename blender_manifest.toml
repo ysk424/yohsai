@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.12.5-ppf"
+version = "0.12.6-ppf"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"

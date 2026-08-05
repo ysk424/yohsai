@@ -356,6 +356,20 @@ def sew_zero_gravity(
         raise KitsukeError(
             "The solver returned a non-finite state; the cloth was left unchanged."
         )
+    # Sewing moves cloth a garment's width at most. A result that throws a
+    # vertex far past the Body is not cloth, it is a rebuilt panel that failed
+    # to locate one of its vertices, and writing it back would scatter the
+    # garment across the scene with nothing to say why.
+    body_size = float(
+        np.linalg.norm(body_snapshot.bounds_maximum - body_snapshot.bounds_minimum)
+    )
+    travelled = np.linalg.norm(sewn - positions, axis=1)
+    if travelled.max() > body_size:
+        raise KitsukeError(
+            f"The solver moved a vertex {travelled.max():.2f} m, further than the "
+            f"whole Body ({body_size:.2f} m), so the result was discarded and the "
+            "cloth left unchanged."
+        )
 
     _scatter(parts, sewn)
     context.view_layer.update()
