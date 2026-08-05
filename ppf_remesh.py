@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 import numpy as np
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, cKDTree
 
 
 # A face smaller than this fraction of one lattice cell holds no cloth, so it
@@ -43,6 +43,20 @@ _AREA_FLOOR = 1.0e-9
 
 class RemeshError(RuntimeError):
     """A panel cannot be re-triangulated from its outline."""
+
+
+def _clamped(weights: np.ndarray) -> np.ndarray:
+    """Barycentric weights held inside their triangle.
+
+    A point that lands outside every triangle is assigned its nearest one,
+    and negative weights would then place it by extrapolation -- unbounded,
+    and against a small triangle wildly so. Clamping puts it on the triangle
+    instead, so a vertex the triangulation could not contain still ends up
+    somewhere on the cloth.
+    """
+    clamped = np.clip(weights, 0.0, None)
+    total = clamped.sum(axis=1, keepdims=True)
+    return np.divide(clamped, total, out=np.full_like(clamped, 1.0 / 3.0), where=total > 0)
 
 
 def _components(vertex_count: int, faces: np.ndarray) -> list[np.ndarray]:
@@ -108,15 +122,27 @@ def _take(outgoing: dict[int, list[int]], node: int) -> int:
     return end
 
 
-def _plane_basis(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Origin and 3x2 basis of the panel's own plane.
+def _lift(pattern: np.ndarray, positions: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """Read 3D positions at pattern-space points, off the original panel.
 
-    The panels are flat by construction, so the two dominant singular
-    directions carry the whole shape and projecting onto them loses nothing.
+    The panel is a piecewise-linear map from its pattern to the cloth, so a
+    new lattice point takes the position of wherever it falls in the mesh
+    that is already there.
     """
-    origin = points.mean(axis=0)
-    _, _, directions = np.linalg.svd(points - origin, full_matrices=False)
-    return origin, directions[:2].T
+    triangulation = Delaunay(pattern)
+    found = triangulation.find_simplex(targets)
+    outside = found < 0
+    if outside.any():
+        centroids = pattern[triangulation.simplices].mean(axis=1)
+        found[outside] = cKDTree(centroids).query(targets[outside])[1]
+    simplices = triangulation.simplices[found]
+    transform = triangulation.transform[found]
+    offset = targets - transform[:, 2]
+    first_two = np.einsum("ijk,ik->ij", transform[:, :2], offset)
+    weights = _clamped(
+        np.concatenate([first_two, 1.0 - first_two.sum(axis=1, keepdims=True)], axis=1)
+    )
+    return np.einsum("ij,ijk->ik", weights, positions[simplices])
 
 
 def _signed_area(polygon: np.ndarray) -> float:
@@ -203,8 +229,17 @@ def _triangulate(
     return points, faces, orphaned
 
 
-def rebuild(vertices: np.ndarray, faces: np.ndarray) -> dict:
+def rebuild(vertices: np.ndarray, faces: np.ndarray, pattern: np.ndarray) -> dict:
     """Replace each panel's interior, keeping its outline vertex-for-vertex.
+
+    Triangulation happens in the panel's authored pattern coordinates, not in
+    a plane fitted to its current shape.  A panel is only flat when it is
+    first loaded: sewing curves it, and a sleeve is a tube from the start.
+    Flattening a tube onto a plane folds it over itself, so the outline
+    self-crosses and the triangulation comes out inside out -- which is what
+    the solver rejects when it counts self-intersections.  The pattern is flat
+    by definition and stays flat however the cloth is bent, so it is the
+    domain this belongs in.
 
     Returns the clean mesh, plus what :func:`transfer` needs to read the
     original vertices back out of it.
@@ -224,21 +259,34 @@ def rebuild(vertices: np.ndarray, faces: np.ndarray) -> dict:
         if not len(panel_faces):
             continue
 
-        origin, basis = _plane_basis(vertices[panel_vertices])
         loops_indices = _boundary_loops(panel_faces)
         boundary_indices = np.concatenate([np.asarray(loop) for loop in loops_indices])
-        flat = (vertices - origin) @ basis
+        flat = pattern[:, :2]
         loops = [flat[np.asarray(loop)] for loop in loops_indices]
         # Orient every loop the same way so even-odd sees holes as holes.
         loops = [loop if _signed_area(loop) > 0 else loop[::-1] for loop in loops]
 
-        spacing = _panel_spacing(vertices, panel_faces)
+        # Lattice pitch comes from the pattern too, so the replacement carries
+        # the resolution the panel was authored at rather than whatever its
+        # current stretch happens to be.
+        spacing = _panel_spacing(flat, panel_faces)
         interior = _interior_points(loops, spacing)
         points, panel_clean_faces, orphaned = _triangulate(
             flat[boundary_indices], interior, loops, spacing
         )
 
-        clean_vertices.append(origin + points @ basis.T)
+        # Boundary points are original vertices and keep their exact position;
+        # the new interior points are read off the panel as it stands.
+        boundary_count = len(boundary_indices)
+        clean_positions = np.empty((len(points), 3), dtype=np.float64)
+        clean_positions[:boundary_count] = vertices[boundary_indices]
+        if len(points) > boundary_count:
+            clean_positions[boundary_count:] = _lift(
+                flat[panel_vertices],
+                vertices[panel_vertices],
+                points[boundary_count:],
+            )
+        clean_vertices.append(clean_positions)
         clean_faces.append(panel_clean_faces + total)
         kept[boundary_indices] = np.arange(len(boundary_indices)) + total
         # An outline vertex in no triangle is not a usable seam anchor, so it
@@ -250,7 +298,11 @@ def rebuild(vertices: np.ndarray, faces: np.ndarray) -> dict:
                 "original": panel_vertices,
                 "flat": flat[panel_vertices],
                 "points": points,
-                "faces": panel_clean_faces + total,
+                # Where this panel's points start in the combined mesh. Derived
+                # rather than recomputed later: the lowest index its faces use
+                # is not the same thing, because a dropped face can leave the
+                # first point unreferenced.
+                "offset": total,
             }
         )
         total += len(points)
@@ -263,13 +315,14 @@ def rebuild(vertices: np.ndarray, faces: np.ndarray) -> dict:
     }
 
 
-def _panel_spacing(vertices: np.ndarray, faces: np.ndarray) -> float:
-    """The panel's own lattice pitch, read from its healthy edges.
+def _panel_spacing(flat: np.ndarray, faces: np.ndarray) -> float:
+    """The panel's own lattice pitch, read from its healthy pattern edges.
 
     The median edge survives the slivers that the minimum does not, so it is
     what the replacement lattice should match: the clean mesh then carries
     the same resolution the pattern was authored at.
     """
+    vertices = flat
     edges = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
     lengths = np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1)
     spacing = float(np.median(lengths))
@@ -306,7 +359,6 @@ def transfer(rebuilt: dict, solved: np.ndarray, vertex_count: int) -> np.ndarray
     result = np.zeros((vertex_count, 3), dtype=np.float64)
     for panel in rebuilt["panels"]:
         points = panel["points"]
-        faces = panel["faces"]
         triangulation = Delaunay(points)
         found = triangulation.find_simplex(panel["flat"])
 
@@ -327,8 +379,7 @@ def transfer(rebuilt: dict, solved: np.ndarray, vertex_count: int) -> np.ndarray
         weights = np.concatenate([first_two, 1.0 - first_two.sum(axis=1, keepdims=True)], axis=1)
 
         # Delaunay indexes the panel's own point block; lift to the solved mesh.
-        base = int(faces.min()) if len(faces) else 0
         result[panel["original"]] = np.einsum(
-            "ij,ijk->ik", weights, solved[simplices + base]
+            "ij,ijk->ik", weights, solved[simplices + panel["offset"]]
         )
     return result

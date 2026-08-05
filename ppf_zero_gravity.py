@@ -192,8 +192,10 @@ def _cloth_geometry(parts: list[_PartRange]) -> tuple[np.ndarray, np.ndarray, np
     position_blocks: list[np.ndarray] = []
     face_blocks: list[np.ndarray] = []
     locked_blocks: list[np.ndarray] = []
+    pattern_blocks: list[np.ndarray] = []
     for part in parts:
         mesh = part.obj.data
+        pattern_blocks.append(_pattern_coordinates(part))
         mesh.calc_loop_triangles()
         triangles = np.empty((len(mesh.loop_triangles), 3), dtype=np.int64)
         mesh.loop_triangles.foreach_get("vertices", triangles.ravel())
@@ -215,7 +217,34 @@ def _cloth_geometry(parts: list[_PartRange]) -> tuple[np.ndarray, np.ndarray, np
         np.concatenate(position_blocks).astype(np.float64),
         np.concatenate(face_blocks),
         np.concatenate(locked_blocks),
+        np.concatenate(pattern_blocks).astype(np.float64),
     )
+
+
+def _pattern_coordinates(part: _PartRange) -> np.ndarray:
+    """The panel's authored flat pattern coordinates, per vertex.
+
+    This is the domain the solver's mesh is rebuilt in, because it is the one
+    thing about a panel that stays flat: the cloth curves as it is sewn, and a
+    sleeve is a tube before anything is sewn at all.
+    """
+    mesh = part.obj.data
+    attribute = mesh.attributes.get("yohsai_pattern_position")
+    if (
+        attribute is None
+        or attribute.domain != "POINT"
+        or attribute.data_type != "FLOAT_VECTOR"
+        or len(attribute.data) != len(mesh.vertices)
+    ):
+        raise KitsukeError(
+            f"{part.obj.name} has no valid pattern coordinates. "
+            "Load it again before Zero GRAVITY."
+        )
+    block = np.empty((len(mesh.vertices), 3), dtype=np.float64)
+    attribute.data.foreach_get("vector", block.ravel())
+    if not np.all(np.isfinite(block)):
+        raise KitsukeError(f"{part.obj.name} has non-finite pattern coordinates.")
+    return block
 
 
 def _validate(
@@ -260,7 +289,7 @@ def sew_zero_gravity(
     interpreter = _zozo_python(root)
 
     parts = _part_ranges(collection)
-    positions, faces, locked = _cloth_geometry(parts)
+    positions, faces, locked, pattern = _cloth_geometry(parts)
     seams = _seam_constraints_from_parts(collection, parts)
     _validate(parts, positions, seams, locked)
     body_snapshot = _body_snapshot(context, body)
@@ -290,6 +319,7 @@ def sew_zero_gravity(
             input_path,
             ppf_root=str(root),
             cloth_vertices=positions,
+            cloth_pattern=pattern,
             cloth_faces=faces,
             seam_pairs=seams.astype(np.int64),
             body_vertices=body_snapshot.vertices.astype(np.float64),

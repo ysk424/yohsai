@@ -87,7 +87,8 @@ def run(input_path: str, output_path: str) -> dict:
     # Yohsai's own triangulation carries interior slivers an implicit solver
     # cannot assemble; ppf_remesh replaces each panel's interior while keeping
     # its outline, so the seams and the cut are untouched.
-    rebuilt = ppf_remesh.rebuild(cloth_vertices, cloth_faces)
+    cloth_pattern = np.ascontiguousarray(data["cloth_pattern"], dtype=np.float64)
+    rebuilt = ppf_remesh.rebuild(cloth_vertices, cloth_faces, cloth_pattern)
     solve_vertices = rebuilt["vertices"]
     solve_faces = rebuilt["faces"]
     solve_seams = ppf_remesh.remap_seams(seam_pairs, rebuilt["kept"])
