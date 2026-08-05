@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.11.0-rtx"
+version = "0.11.1-rtx"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -58,6 +58,8 @@ paths = [
     "native/src/body_bvh.hpp",
     "native/src/material_cuda.hpp",
     "native/src/material_cuda.cu",
+    "native/src/body_contact_cuda.hpp",
+    "native/src/body_contact_cuda.cu",
     "native/src/solver.hpp",
     "native/src/solver.cpp",
     "native/src/c_api.cpp",

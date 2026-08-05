@@ -239,6 +239,7 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
     build_color_groups();
 #if defined(YSC_ENABLE_CUDA)
     init_material_cuda();
+    init_body_contact_cuda();
 #endif
     require_finite_state();
 }
@@ -322,6 +323,50 @@ void Solver::init_material_cuda() {
 
 bool Solver::cuda_materials_ready() const noexcept {
     return material_cuda_ && material_cuda_->ready();
+}
+
+void Solver::init_body_contact_cuda() {
+    body_contact_cuda_.reset();
+    if (!BodyContactCuda::device_available() || body_bvh_.empty()) {
+        return;
+    }
+    // Reuse the same host pack buffers material CUDA may have allocated.
+    if (cuda_pos_pack_.size() != vertices_.size() * 3) {
+        cuda_pos_pack_.resize(vertices_.size() * 3);
+    }
+    if (cuda_locked_pack_.size() != vertices_.size()) {
+        cuda_locked_pack_.resize(vertices_.size());
+    }
+    auto backend = std::make_unique<BodyContactCuda>();
+    if (!backend->init(static_cast<int32_t>(vertices_.size()), body_bvh_)) {
+        return;
+    }
+    body_contact_cuda_ = std::move(backend);
+}
+
+bool Solver::cuda_body_contact_ready() const noexcept {
+    return body_contact_cuda_ && body_contact_cuda_->ready();
+}
+
+void Solver::project_body_contacts_cuda(
+    float* external_positions,
+    int32_t* external_locked,
+    bool gather,
+    bool download_hits) {
+    if (!cuda_body_contact_ready()) {
+        return;
+    }
+    constexpr float kCollisionSearchM = 0.04F;
+    clear_contact_corrections();
+    last_auto_candidate_count_ = body_contact_cuda_->project(
+        external_positions,
+        external_locked,
+        kCollisionSearchM,
+        config_.contact_thickness,
+        gather);
+    if (download_hits) {
+        body_contact_cuda_->download_hits(contact_correction_counts_.data());
+    }
 }
 
 void Solver::pack_positions_to_cuda_buffer() {
@@ -991,6 +1036,18 @@ int32_t Solver::gather_body_contacts_auto() {
 }
 
 void Solver::project_body_contacts_auto(bool gather) {
+    // Prefer CUDA BVH contact when available (static Body already in VRAM).
+    // The OpenMP path remains the fallback when CUDA init failed.
+#if defined(YSC_ENABLE_CUDA)
+    if (cuda_body_contact_ready()) {
+        pack_positions_to_cuda_buffer();
+        body_contact_cuda_->upload_cloth(cuda_pos_pack_.data(), cuda_locked_pack_.data());
+        project_body_contacts_cuda(nullptr, nullptr, gather, true);
+        body_contact_cuda_->download_cloth(cuda_pos_pack_.data());
+        unpack_positions_from_cuda_buffer();
+        return;
+    }
+#endif
     // Each unlocked vertex owns at most one face, so the correction write is
     // race-free under OpenMP. Gathering every contact pass is too expensive on
     // high-poly bodies; the advance loop gathers once per substep.
@@ -1109,10 +1166,12 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     last_auto_candidate_count_ = 0;
     const int32_t external_candidates = auto_body ? 0 : desc.body_candidate_count;
 #if defined(YSC_ENABLE_CUDA)
-    // Below ~20k edges, OpenMP on 9950X3D usually beats CUDA because each
-    // contact pass still needs host BVH + H2D/D2H. Prefer GPU when the
-    // material workload dominates (full kimono / finer lattice).
-    bool use_cuda_materials = cuda_materials_ready() && edges_.size() >= 20000;
+    // With CUDA Body contact, material can stay on device across contact passes
+    // (no host BVH). Prefer CUDA materials whenever ready; force env still wins.
+    // Without contact CUDA, keep the old 20k-edge gate (H2D/D2H around host BVH).
+    const bool contact_cuda = auto_body && cuda_body_contact_ready();
+    bool use_cuda_materials = cuda_materials_ready() &&
+        (contact_cuda || edges_.size() >= 20000);
 #if defined(_MSC_VER)
     char* force = nullptr;
     size_t force_len = 0;
@@ -1136,6 +1195,7 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
 #endif
 #else
     const bool use_cuda_materials = false;
+    const bool contact_cuda = false;
 #endif
     for (int32_t substep = 0; substep < config_.substeps; ++substep) {
         // Ahead of the prediction, so integrate() rebases `previous` onto the
@@ -1147,8 +1207,7 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
         update_seam_capture();
 #if defined(YSC_ENABLE_CUDA)
         if (use_cuda_materials) {
-            // Keep cloth positions on the device for the whole substep's
-            // material iterations; only bounce through host for Body contact.
+            // Keep cloth positions on the device for material (+ contact when CUDA).
             pack_positions_to_cuda_buffer();
             pack_seam_captured_to_cuda();
             material_cuda_->upload_positions(cuda_pos_pack_.data());
@@ -1174,22 +1233,50 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             // gathers nearest body faces once per substep on the first contact
             // pass, then reuses those pairs for later contact passes.
             if ((iteration & 1) == 0 || iteration + 1 == iterations) {
+                const bool gather_this_pass = (iteration == 0);
+                // finish_substep reads contact hits after the last contact pass
+                // of the substep (always the final iteration).
+                const bool is_last_contact_of_substep = (iteration + 1 == iterations);
 #if defined(YSC_ENABLE_CUDA)
-                if (use_cuda_materials) {
-                    material_cuda_->download_positions(cuda_pos_pack_.data());
+                if (auto_body && contact_cuda && use_cuda_materials) {
+                    // Material and contact share device positions (no mid-loop D2H).
+                    project_body_contacts_cuda(
+                        material_cuda_->device_positions(),
+                        material_cuda_->device_locked(),
+                        gather_this_pass,
+                        is_last_contact_of_substep);
+                } else if (auto_body && contact_cuda) {
+                    // Material on host: upload, contact on device, download.
+                    pack_positions_to_cuda_buffer();
+                    body_contact_cuda_->upload_cloth(
+                        cuda_pos_pack_.data(), cuda_locked_pack_.data());
+                    project_body_contacts_cuda(
+                        nullptr, nullptr, gather_this_pass, is_last_contact_of_substep);
+                    body_contact_cuda_->download_cloth(cuda_pos_pack_.data());
                     unpack_positions_from_cuda_buffer();
+                } else {
+                    // Host contact path. If materials just ran on device, sync down.
+                    if (use_cuda_materials) {
+                        material_cuda_->download_positions(cuda_pos_pack_.data());
+                        unpack_positions_from_cuda_buffer();
+                    }
+                    if (auto_body) {
+                        project_body_contacts_auto(gather_this_pass);
+                    } else {
+                        project_body_contacts_external(
+                            desc.body_candidates, desc.body_candidate_count);
+                    }
+                    if (use_cuda_materials) {
+                        pack_positions_to_cuda_buffer();
+                        material_cuda_->upload_positions(cuda_pos_pack_.data());
+                    }
                 }
-#endif
+#else
                 if (auto_body) {
-                    const bool gather_this_pass = (iteration == 0);
                     project_body_contacts_auto(gather_this_pass);
                 } else {
-                    project_body_contacts_external(desc.body_candidates, desc.body_candidate_count);
-                }
-#if defined(YSC_ENABLE_CUDA)
-                if (use_cuda_materials) {
-                    pack_positions_to_cuda_buffer();
-                    material_cuda_->upload_positions(cuda_pos_pack_.data());
+                    project_body_contacts_external(
+                        desc.body_candidates, desc.body_candidate_count);
                 }
 #endif
             }

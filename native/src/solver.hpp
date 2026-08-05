@@ -11,6 +11,7 @@
 #include <vector>
 
 #if defined(YSC_ENABLE_CUDA)
+#  include "body_contact_cuda.hpp"
 #  include "material_cuda.hpp"
 #endif
 
@@ -109,6 +110,7 @@ private:
 
 #if defined(YSC_ENABLE_CUDA)
     std::unique_ptr<MaterialCuda> material_cuda_;
+    std::unique_ptr<BodyContactCuda> body_contact_cuda_;
     std::vector<float> cuda_pos_pack_;
     std::vector<uint8_t> cuda_seam_captured_;
     std::vector<int32_t> cuda_locked_pack_;
@@ -135,14 +137,24 @@ private:
     void project_distance(int32_t a, int32_t b, float target_length, float relaxation);
 #if defined(YSC_ENABLE_CUDA)
     void init_material_cuda();
+    void init_body_contact_cuda();
     void pack_positions_to_cuda_buffer();
     void unpack_positions_from_cuda_buffer();
     void pack_seam_captured_to_cuda();
     [[nodiscard]] bool cuda_materials_ready() const noexcept;
+    [[nodiscard]] bool cuda_body_contact_ready() const noexcept;
 #endif
     void project_body_contacts_external(const int32_t* candidates, int32_t count);
     // gather=true rebuilds nearest body faces; false reuses contact_face_.
     void project_body_contacts_auto(bool gather);
+#if defined(YSC_ENABLE_CUDA)
+    // Device-resident contact; external_positions null uses contact-owned cloth buffers.
+    void project_body_contacts_cuda(
+        float* external_positions,
+        int32_t* external_locked,
+        bool gather,
+        bool download_hits);
+#endif
     void finish_substep(float time_step);
     [[nodiscard]] Vec3 closest_triangle_point(
         const Vec3& point,

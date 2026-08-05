@@ -73,6 +73,13 @@ constraint colouring; `SOLVER_DESIGN.md` owns that contract. Operational notes:
 - With correct colouring, different thread counts must match each other; if
   they disagree, colouring is incomplete. `tests/openmp_colour_smoke.py`
   checks that property on a small hanging lattice.
+- **Body contact (auto BVH)** can run on CUDA when a device is present: the
+  static Body BVH is uploaded once at solver create (`body_contact_cuda.cu`).
+  Cloth vertices gather nearest faces and project the thickness shell on the
+  GPU. OpenMP host BVH remains the fallback. Force material path with
+  `YSC_FORCE_MATERIAL=cuda|cpu`. With CUDA contact available, material CUDA
+  is preferred even below the former 20k-edge gate so positions stay device-
+  resident across contact passes.
 
 ### Hardware target and measured cost
 

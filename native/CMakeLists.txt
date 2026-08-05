@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-option(YSC_ENABLE_CUDA "Build coloured material projections with CUDA" ON)
+option(YSC_ENABLE_CUDA "Build CUDA material projections and Body BVH contact" ON)
 
 set(YSC_SOLVER_SOURCES
     src/c_api.cpp
@@ -12,8 +12,8 @@ if(YSC_ENABLE_CUDA)
     check_language(CUDA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
-        list(APPEND YSC_SOLVER_SOURCES src/material_cuda.cu)
-        message(STATUS "Yohsai: CUDA material projections ENABLED (${CMAKE_CUDA_COMPILER})")
+        list(APPEND YSC_SOLVER_SOURCES src/material_cuda.cu src/body_contact_cuda.cu)
+        message(STATUS "Yohsai: CUDA material + Body contact ENABLED (${CMAKE_CUDA_COMPILER})")
     else()
         set(YSC_ENABLE_CUDA OFF)
         message(WARNING "Yohsai: CUDA requested but no compiler found; building OpenMP-only")

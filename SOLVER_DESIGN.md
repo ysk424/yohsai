@@ -90,12 +90,16 @@ pure serial Gauss-Seidel update order, but different thread counts on the same
 coloured schedule must agree; `tests/openmp_colour_smoke.py` checks that.
 
 When built with `YSC_ENABLE_CUDA`, the same colour schedule runs the material
-projections on the GPU (`material_cuda.cu`, sm_89 / sm_120). The host keeps
-integrate, seam attraction, capture, and Body contact. Auto-select prefers CUDA
-at 20k edges or more; `YSC_FORCE_MATERIAL=cuda|cpu` overrides it. Without a
-device the solver stays on OpenMP.
+projections on the GPU (`material_cuda.cu`, sm_89 / sm_120). Integrate, seam
+attraction, and capture stay on the host. Body contact can also run on CUDA
+(`body_contact_cuda.cu`): the static Body BVH is uploaded once at create, and
+gather/project run per cloth vertex on the device. With CUDA contact ready,
+material CUDA is preferred even below 20k edges so positions stay device-
+resident across contact passes; otherwise the old 20k-edge gate applies.
+`YSC_FORCE_MATERIAL=cuda|cpu` overrides material selection. Without a device
+the solver stays on OpenMP for both materials and contact.
 
-Body nearest-face queries run inside the DLL on an AABB BVH built at create time
+Body nearest-face queries use an AABB BVH built at create time
 (`body_bvh.hpp`), selected with `YSC_BODY_CANDIDATES_AUTO`. The advance loop
 gathers once per substep and reuses those faces for later contact passes.
 

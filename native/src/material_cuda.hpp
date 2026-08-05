@@ -79,6 +79,10 @@ public:
     void download_positions(float* positions_xyz) const;
     void upload_locked(const int32_t* locked);
 
+    // Device pointers for Body contact to share the same resident cloth buffer.
+    [[nodiscard]] float* device_positions() noexcept { return d_pos_; }
+    [[nodiscard]] int32_t* device_locked() noexcept { return d_locked_; }
+
     // 0/1 per seam; only captured seams project.
     void upload_seam_captured(const uint8_t* captured, int32_t seam_count);
 

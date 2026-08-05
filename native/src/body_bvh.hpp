@@ -61,6 +61,65 @@ public:
     [[nodiscard]] Vec3 bounds_min() const noexcept { return bounds_min_; }
     [[nodiscard]] Vec3 bounds_max() const noexcept { return bounds_max_; }
 
+    // Flat tables for uploading a static Body BVH to CUDA (body is fixed).
+    struct GpuNode {
+        float bmin[3];
+        float bmax[3];
+        int32_t left;
+        int32_t right;
+        int32_t first;
+        int32_t count;
+        int32_t leaf;  // 0/1
+        int32_t _pad;
+    };
+    struct GpuFace {
+        float a[3];
+        float b[3];
+        float c[3];
+        int32_t face_index;
+        int32_t _pad[3];  // 36 + 4 + 12 = 48 (host/device layout match)
+    };
+
+    void export_gpu(
+        std::vector<GpuNode>& nodes,
+        std::vector<int32_t>& leaves,
+        std::vector<GpuFace>& faces) const {
+        nodes.resize(nodes_.size());
+        for (size_t i = 0; i < nodes_.size(); ++i) {
+            const Node& n = nodes_[i];
+            GpuNode& g = nodes[i];
+            g.bmin[0] = n.bmin.x;
+            g.bmin[1] = n.bmin.y;
+            g.bmin[2] = n.bmin.z;
+            g.bmax[0] = n.bmax.x;
+            g.bmax[1] = n.bmax.y;
+            g.bmax[2] = n.bmax.z;
+            g.left = n.left;
+            g.right = n.right;
+            g.first = n.first;
+            g.count = n.count;
+            g.leaf = n.leaf ? 1 : 0;
+            g._pad = 0;
+        }
+        leaves = leaves_;
+        faces.resize(face_refs_.size());
+        for (size_t i = 0; i < face_refs_.size(); ++i) {
+            const FaceRef& f = face_refs_[i];
+            GpuFace& g = faces[i];
+            g.a[0] = f.a.x;
+            g.a[1] = f.a.y;
+            g.a[2] = f.a.z;
+            g.b[0] = f.b.x;
+            g.b[1] = f.b.y;
+            g.b[2] = f.b.z;
+            g.c[0] = f.c.x;
+            g.c[1] = f.c.y;
+            g.c[2] = f.c.z;
+            g.face_index = f.face_index;
+            g._pad[0] = g._pad[1] = g._pad[2] = 0;
+        }
+    }
+
     // Nearest triangle face index within max_distance. Returns false if none.
     [[nodiscard]] bool nearest_face(
         const Vec3& point,
