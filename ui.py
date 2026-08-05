@@ -13,7 +13,14 @@ from pathlib import Path
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, PointerProperty, StringProperty
-from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
+from bpy.types import (
+    AddonPreferences,
+    Collection,
+    Object,
+    Operator,
+    Panel,
+    PropertyGroup,
+)
 
 from .i18n import translations_dict
 from .kitsuke import (
@@ -27,6 +34,7 @@ from .kitsuke import (
     has_kitsuke_session,
     reset_runtime_epoch,
 )
+from . import ppf_zero_gravity
 from .ppf_zero_gravity import SETTLE_FRAMES, SEWING_FRAMES, sew_zero_gravity
 from .mesh_loader import (
     LOCKED_OBJECT_KEY,
@@ -522,6 +530,34 @@ def _poll_zozo_mcp() -> float | None:
     return None
 
 
+class YohsaiPreferences(AddonPreferences):
+    """Machine-level settings, kept out of the .blend file.
+
+    Where the ZOZO Contact Solver lives is a property of the machine, not
+    of a garment, so it belongs here rather than on the Scene: it has to
+    survive opening a different file, and it is not something to re-enter
+    per project.
+    """
+
+    bl_idname = __package__
+
+    ppf_root: StringProperty(
+        name="ZOZO Contact Solver",
+        description=(
+            "Directory of the ppf-contact-solver checkout Zero GRAVITY sews "
+            "with. Leave empty to search the usual locations"
+        ),
+        subtype="DIR_PATH",
+        default="",
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "ppf_root")
+        resolved = ppf_zero_gravity.describe_zozo_root()
+        layout.label(text=resolved, icon="CHECKMARK" if "Using" in resolved else "ERROR")
+
+
 class YohsaiProperties(PropertyGroup):
     svg_path: StringProperty(
         name="Pattern Path",
@@ -965,6 +1001,7 @@ class YOHSAI_OT_lock_selection(Operator):
 
 
 _classes = (
+    YohsaiPreferences,
     YohsaiProperties,
     YOHSAI_OT_load_svg,
     YOHSAI_OT_update_svg,

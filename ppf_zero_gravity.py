@@ -73,28 +73,75 @@ AIR_DRAG = 5.0
 
 _ENVIRONMENT_ROOT = "YOHSAI_PPF_ROOT"
 _DRIVER = "ppf_driver.py"
+_TREE_NAME = "ppf-contact-solver"
+
+
+def is_zozo_tree(path: Path) -> bool:
+    """Whether this directory is a usable ZOZO Contact Solver checkout."""
+    return (path / "frontend" / "__init__.py").is_file()
+
+
+def _configured_root() -> str:
+    """The path set in Add-on Preferences, if the add-on is registered."""
+    try:
+        preferences = bpy.context.preferences.addons[__package__].preferences
+    except (AttributeError, KeyError):
+        return ""
+    return bpy.path.abspath(getattr(preferences, "ppf_root", "") or "").strip()
+
+
+def _candidate_roots() -> list[Path]:
+    """Where to look, best evidence first.
+
+    Installed as an extension, this module lives under Blender's own
+    `bl_ext` directory, so a path relative to it finds nothing; that
+    fallback is only useful when Yohsai runs from its checkout. Hence the
+    explicit setting first and a search of the usual checkout homes after.
+    """
+    candidates: list[Path] = []
+    override = os.environ.get(_ENVIRONMENT_ROOT, "").strip()
+    if override:
+        candidates.append(Path(override))
+    configured = _configured_root()
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(Path(__file__).resolve().parent.parent / _TREE_NAME)
+    home = Path.home()
+    candidates.extend(
+        home / parent / _TREE_NAME
+        for parent in ("git", "source/repos", "Documents", "projects", "")
+    )
+    return candidates
 
 
 def _zozo_root() -> Path:
-    """Locate the ZOZO Contact Solver tree.
-
-    The environment variable wins so a developer can point at a worktree;
-    otherwise assume it sits beside Yohsai's own checkout, which is how the
-    hand-off path already expects to find it.
-    """
-    override = os.environ.get(_ENVIRONMENT_ROOT, "").strip()
-    candidates = []
-    if override:
-        candidates.append(Path(override))
-    candidates.append(Path(__file__).resolve().parent.parent / "ppf-contact-solver")
+    candidates = _candidate_roots()
     for candidate in candidates:
-        if (candidate / "frontend" / "__init__.py").is_file():
+        if is_zozo_tree(candidate):
             return candidate
-    searched = ", ".join(str(candidate) for candidate in candidates)
+    searched = "\n".join(f"  {candidate}" for candidate in candidates)
     raise KitsukeError(
-        "The ZOZO Contact Solver tree was not found "
-        f"(looked in: {searched}). Set {_ENVIRONMENT_ROOT} to its path."
+        "The ZOZO Contact Solver tree was not found. Set its path in "
+        "Preferences > Add-ons > Yohsai (or the "
+        f"{_ENVIRONMENT_ROOT} environment variable). Looked in:\n{searched}"
     )
+
+
+def describe_zozo_root() -> str:
+    """One line for Preferences saying what the path setting resolved to.
+
+    Reported where the path is entered, so a wrong directory is visible
+    when it is typed rather than when Zero GRAVITY is first pressed.
+    """
+    try:
+        root = _zozo_root()
+    except KitsukeError:
+        return "Not found. Zero GRAVITY cannot sew until this points at the checkout."
+    try:
+        _zozo_python(root)
+    except KitsukeError as exc:
+        return str(exc)
+    return f"Using {root}"
 
 
 def _zozo_python(root: Path) -> Path:
