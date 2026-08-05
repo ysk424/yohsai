@@ -59,17 +59,21 @@ BEND = 1.0
 STRAIN_LIMIT = 0.05
 TIME_STEP = 0.01
 
-# The job sews first and settles second; the driver owns why.  Measured on
-# the reference garment (9.6k cloth vertices, the 225k-vertex Body as a
-# static collider): 60 mm of seam gap reaches 1.04 mm mean / 1.18 mm max --
-# 1 mm being the contact offset, i.e. the cloth's own thickness, so the
-# seam is shut -- and the last frame moves 0.004 mm, in 26 s total.
-SEWING_FRAMES = 8
+# The job sews first and settles second; the driver owns why.
+SEWING_FRAMES = 6
 SETTLE_FRAMES = 5
 # Drag high enough to settle the garment also overpowers the seam force, so
 # it belongs only to the second phase. Anything from 2 upward settles; the
 # value is not delicate.
 AIR_DRAG = 5.0
+STITCH_STIFFNESS = 1.0
+# Raises the cap the seam force saturates at; the driver owns why it matters.
+# The reference garment's panels start 292 mm apart, and the stock factor of
+# 10 caps the pull at about 5 mm of separation, so they barely move: 8 frames
+# closed 292 mm to 211 mm.  At 100 the same seam reaches 2.1 mm in 6.  Going
+# further buys nothing measurable (3000 gives 2.06 mm), so this is set past
+# the widest seam rather than as high as it will go.
+STITCH_LENGTH_FACTOR = 100.0
 
 _ENVIRONMENT_ROOT = "YOHSAI_PPF_ROOT"
 _DRIVER = "ppf_driver.py"
@@ -270,6 +274,8 @@ def sew_zero_gravity(
         "sew_frames": int(frames),
         "settle_frames": SETTLE_FRAMES,
         "air_drag": AIR_DRAG,
+        "stitch_stiffness": STITCH_STIFFNESS,
+        "stitch_length_factor": STITCH_LENGTH_FACTOR,
     }
 
     # Cleaning up scratch files must never discard a finished solve, so the

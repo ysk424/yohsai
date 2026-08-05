@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.12.2-ppf"
+version = "0.12.3-ppf"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -32,6 +32,7 @@ paths = [
     "kitsuke.py",
     "ppf_zero_gravity.py",
     "ppf_driver.py",
+    "ppf_remesh.py",
     "zozo_handoff.py",
     "zozo_mcp_client.py",
     "shell_isect_bridge.py",
