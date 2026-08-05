@@ -1,8 +1,9 @@
 # Zero GRAVITY: sewing with the ZOZO Contact Solver
 
-Status: in progress. Every seam of the reference garment now resolves into
-springs -- body, armholes, neckline and the three RING seams. Reading the solved
-cloth back is what is still wrong.
+Status: in progress. The front and back panels sew into a wearable dress. Every
+seam of the reference garment resolves into springs -- body, armholes, neckline
+and the three RING seams -- but the press that attaches the sleeves is refused
+at scene build, and reading remeshed cloth back is still wrong.
 
 Zero GRAVITY closes every seam of a garment. It is the one step where the
 square-lattice solver could not be made faster without being made worse:
@@ -108,6 +109,16 @@ nothing: the seam that closes the ring is a seam the part carries. The collar is
 a RING panel too, so its neckline closes the same way.
 
 ## What is not finished
+
+**The sleeve press is rejected before it starts.** With the body already sewn
+and the sleeves released, scene build fails with
+`frontend._scene_.ValidationError: 343 self-intersections (343 tri-tri)`. That
+is the input being refused, not the solve going wrong. It also puts a limit on
+the "panels are cut flat" promise above: it holds for the first press, but a
+staged workflow hands the second press cloth that is already draped, and the
+flat sleeve panels stand at the shoulders passing through it. Whether the 343
+are sleeve-against-body or the settled body against itself is not yet measured,
+and that measurement is the next step.
 
 **`ppf_remesh.transfer` is wrong.** Locating an original vertex in a rebuilt
 panel returns 0.156 mm of error at the median and kilometres at the worst.
