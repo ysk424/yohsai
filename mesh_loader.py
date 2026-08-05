@@ -15,6 +15,10 @@ from mathutils.bvhtree import BVHTree
 from mathutils.geometry import barycentric_transform, delaunay_2d_cdt
 
 
+# How far a sleeve's two RING edges stand apart before they are sewn. Wide
+# enough that an arm goes in and that the two sides are plainly separate
+# surfaces at rest, small enough that closing it is a short seam.
+RING_OPENING_M = 0.03
 MESH_SPACING_M = 0.01
 # Small panels keep a finer interior lattice so short pieces still read as cloth.
 # Large panels stay on the 10 mm lattice so tension can propagate without a full
@@ -726,7 +730,16 @@ def _ring_construction_vertices(
     circumference = sum(widths) / len(widths)
     if circumference <= 1.0e-10:
         raise MeshLoadError("RING edges do not enclose a usable sleeve width.")
-    radius = circumference / (2.0 * math.pi)
+    # A sleeve is built as a C rather than a closed tube: its two RING edges
+    # stop short of meeting, so the arm goes in through the gap and the seam
+    # is left for the solver to close. Cloth does not stretch to allow that,
+    # so the arc still has to be the pattern's full width -- open it by
+    # widening the curve instead. With the gap subtending its own arc,
+    # radius * (2*pi) - gap == circumference, so the cloth is unchanged and
+    # only the ends are apart.
+    opening = min(RING_OPENING_M, 0.5 * circumference)
+    radius = (circumference + opening) / (2.0 * math.pi)
+    sweep = 2.0 * math.pi - opening / radius
     axis_center = sum(point.y for point in pattern_vertices) / len(pattern_vertices)
 
     top_left = _boundary_x_at_y(left, top.y)
@@ -742,17 +755,19 @@ def _ring_construction_vertices(
         if right_x - left_x <= 1.0e-10:
             raise MeshLoadError("RING boundaries cross while constructing the sleeve tube.")
         u = (point.x - left_x) / (right_x - left_x)
-        angle = 2.0 * math.pi * (u - top_u)
+        angle = sweep * (u - top_u)
         result.append(Vector((point.y - axis_center, radius * math.sin(angle), radius * math.cos(angle))))
     return result
 
 
-def _weld_ring(
+def _seam_ring(
+    panel_id: str,
     pattern_vertices: list[Vector],
     construction_vertices: list[Vector],
     edges: list[tuple[int, int]],
     faces: list[tuple[int, ...]],
     edge_meta: dict[tuple[int, int], EdgeMeta],
+    ring_chains: list[list[int]],
     vertex_kinds: list[int] | None = None,
     shortenable_edges: set[tuple[int, int]] | None = None,
 ) -> tuple[
@@ -760,89 +775,56 @@ def _weld_ring(
     dict[tuple[int, int], EdgeMeta], dict[tuple[int, int], float],
     list[int], set[tuple[int, int]],
 ]:
-    chains = _marked_edge_chains(edges, edge_meta, "ring")
-    if len(chains) != 2 or len(chains[0]) != len(chains[1]):
+    """Make a sleeve's two RING edges a seam instead of welding them shut.
+
+    Welding closed the sleeve while the mesh was being built, which put the
+    mesh builder in the business of sewing and left the panel a tube. A tube
+    is not a simple region of its own pattern -- it is a cylinder, and its
+    boundary is the two open ends rather than the outline the pattern was cut
+    to -- so anything that works in pattern coordinates has no domain to work
+    in, and welding two edges onto each other is exactly what leaves vertices
+    sharing one pattern coordinate.
+
+    Leaving the seam for the solver keeps every panel a plain flat cut with
+    an outline, and puts the closing of it where the rest of the sewing
+    already happens. The two chains carry matching vertex counts by the time
+    they get here, which is what pairing them 1:1 needs.
+    """
+    if len(ring_chains) != 2 or len(ring_chains[0]) != len(ring_chains[1]):
         raise MeshLoadError("The two RING boundaries must produce matching vertex counts.")
-    first, second = chains
-    direct = sum(abs(pattern_vertices[a].y - pattern_vertices[b].y) for a, b in zip(first, second))
-    reverse = sum(abs(pattern_vertices[a].y - pattern_vertices[b].y) for a, b in zip(first, reversed(second)))
-    if reverse < direct:
-        second = list(reversed(second))
-
-    representative = {right: left for left, right in zip(first, second)}
-    groups: dict[int, list[int]] = {}
-    for index in range(len(pattern_vertices)):
-        groups.setdefault(representative.get(index, index), []).append(index)
-    kept = sorted(groups)
-    new_index = {old: index for index, old in enumerate(kept)}
-
-    new_pattern = [
-        sum((pattern_vertices[index] for index in groups[old]), Vector((0.0, 0.0))) / len(groups[old])
-        for old in kept
-    ]
-    new_construction = [
-        sum((construction_vertices[index] for index in groups[old]), Vector((0.0, 0.0, 0.0))) / len(groups[old])
-        for old in kept
-    ]
-
-    def remap_vertex(index: int) -> int:
-        return new_index[representative.get(index, index)]
-
-    new_faces: list[tuple[int, ...]] = []
-    for face in faces:
-        remapped = tuple(remap_vertex(index) for index in face)
-        if len(set(remapped)) < 3:
-            continue
-        new_faces.append(remapped)
-
-    meta_values: dict[tuple[int, int], list[EdgeMeta]] = {}
-    rest_values: dict[tuple[int, int], list[float]] = {}
-    for a, b in edges:
-        key = _edge_key(remap_vertex(a), remap_vertex(b))
-        if key[0] == key[1]:
-            continue
-        meta_values.setdefault(key, []).append(edge_meta.get(_edge_key(a, b), EdgeMeta()))
-        rest_values.setdefault(key, []).append((pattern_vertices[a] - pattern_vertices[b]).length)
-
-    new_meta: dict[tuple[int, int], EdgeMeta] = {}
-    for key, values in meta_values.items():
-        labels = {value.sewing_group for value in values if value.sewing_group}
-        if len(labels) > 1:
-            raise MeshLoadError("RING welding merged conflicting sewing edges.")
-        meta = EdgeMeta(next(iter(labels), None), any(value.fold for value in values), False)
-        if meta.sewing_group or meta.fold:
-            new_meta[key] = meta
-    new_rest = {key: sum(values) / len(values) for key, values in rest_values.items()}
-
-    kinds_src = vertex_kinds if vertex_kinds is not None else [VERTEX_KIND_NORMAL] * len(pattern_vertices)
-    new_kinds = [VERTEX_KIND_NORMAL] * len(kept)
-    for old in kept:
-        kind = VERTEX_KIND_NORMAL
-        for member in groups[old]:
-            member_kind = kinds_src[member] if member < len(kinds_src) else VERTEX_KIND_NORMAL
-            # Prefer edge over proximity over normal when welding merges kinds.
-            if member_kind == VERTEX_KIND_EDGE or (
-                member_kind == VERTEX_KIND_PROXIMITY and kind == VERTEX_KIND_NORMAL
-            ):
-                kind = member_kind
-        new_kinds[new_index[old]] = kind
-
-    new_shortenable: set[tuple[int, int]] = set()
-    if shortenable_edges:
-        for a, b in shortenable_edges:
-            key = _edge_key(remap_vertex(a), remap_vertex(b))
-            if key[0] != key[1]:
-                new_shortenable.add(key)
-
+    # Unique to the panel: two sleeves in one garment must not pair with
+    # each other, and this seam never crosses to another piece of cloth.
+    label = f"RING_{panel_id}"
+    new_meta = dict(edge_meta)
+    for chain in ring_chains:
+        for a, b in zip(chain, chain[1:]):
+            key = _edge_key(a, b)
+            existing = new_meta.get(key, EdgeMeta())
+            if existing.sewing_group and existing.sewing_group != label:
+                raise MeshLoadError(
+                    f"Panel {panel_id!r} marks a RING edge as sewing group "
+                    f"{existing.sewing_group!r} as well."
+                )
+            new_meta[key] = EdgeMeta(label, existing.fold, True)
+    rest = {
+        _edge_key(a, b): (pattern_vertices[a] - pattern_vertices[b]).length
+        for a, b in edges
+        if a != b
+    }
+    kinds = (
+        list(vertex_kinds)
+        if vertex_kinds is not None
+        else [VERTEX_KIND_NORMAL] * len(pattern_vertices)
+    )
     return (
-        new_pattern,
-        new_construction,
-        sorted(rest_values),
-        new_faces,
+        pattern_vertices,
+        construction_vertices,
+        edges,
+        faces,
         new_meta,
-        new_rest,
-        new_kinds,
-        new_shortenable,
+        rest,
+        kinds,
+        set(shortenable_edges or set()),
     )
 
 
@@ -1022,12 +1004,14 @@ def _triangulate_panel(
             edge_rest,
             vertex_kinds,
             shortenable_edges,
-        ) = _weld_ring(
+        ) = _seam_ring(
+            panel_id,
             pattern_vertices,
             construction_vertices,
             result_edges,
             result_faces,
             edge_meta,
+            ring_chains,
             vertex_kinds,
             shortenable_edges,
         )
@@ -1932,10 +1916,25 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
         try:
             if active_has_closed:
                 pairs = _multipart_closed_pairs(by_object, offsets, label)
+            elif len(by_object) == 1 and len(next(iter(by_object.values()))) == 2:
+                # A seam that closes one panel onto itself: the two RING edges
+                # of a sleeve, which meet to put the cloth round an arm. It is
+                # a seam like any other -- two chains of matching vertices that
+                # have to be brought together -- and the only thing unusual is
+                # that both belong to the same piece of cloth.
+                only_object, (left_chain, right_chain) = next(iter(by_object.items()))
+                offset = offsets[only_object]
+                pairs = [
+                    (offset + left_vertex, offset + right_vertex)
+                    for left_vertex, right_vertex in _ordered_vertex_pairs(
+                        left_chain, right_chain, label
+                    )
+                ]
             else:
                 if len(by_object) != 2:
                     raise SewingError(
-                        f"Sewing group {label} must occur on exactly two different cloth parts."
+                        f"Sewing group {label} must occur on exactly two different "
+                        "cloth parts, or twice on one part to close it onto itself."
                     )
                 first_obj, second_obj = sorted(
                     by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0))
