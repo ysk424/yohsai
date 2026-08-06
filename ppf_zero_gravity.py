@@ -2,18 +2,17 @@
 """Zero GRAVITY: sew the panels with the ZOZO Contact Solver.
 
 Zero GRAVITY closes every seam of a garment whose panels are still flat and
-still outside the Body.  That is the whole job, so this runs it as one
-solve rather than as the repeated nudges the square-lattice path uses for
-Normal GRAVITY, which stays exactly as it was.
+still outside the Body.  That is the whole job, so this runs it as one solve
+rather than as the repeated nudges Yohsai's own square-lattice solver used to
+take, which is why that solver is no longer here.
 
-Sewing this way is not the same trade as before.  The square-lattice solver
-reaches a seam by iterating a positional projection, so its stiffness is a
-function of how many iterations a click can afford, and buying speed costs
-correctness.  The contact solver closes a seam with an implicit force
-solved inside its Newton step, so the result is the converged one at any
-step count, and the answer to "make it faster" stops being "make it worse".
-What it costs instead is wall clock: a press is a job of a few seconds, not
-a button that answers in one frame.
+Sewing this way is not the same trade.  A positional projection reaches a
+seam by iterating, so its stiffness is a function of how many iterations a
+click can afford, and buying speed costs correctness.  The contact solver
+closes a seam with an implicit force solved inside its Newton step, so the
+result is the converged one at any step count, and the answer to "make it
+faster" stops being "make it worse".  What it costs instead is wall clock: a
+press is a job of a few seconds, not a button that answers in one frame.
 
 Two things make that affordable, and both come from what Yohsai can promise
 about its own state.  The Body never moves, so it is handed over as a
@@ -47,8 +46,8 @@ from .kitsuke import (
     _seam_constraints_from_parts,
     _transform_points,
     _world_vertices,
+    part_ranges,
 )
-from .mesh_loader import LOCKED_OBJECT_KEY, participating_parts
 
 
 # Solver settings for sewing flat panels in free space.  Young's modulus and
@@ -163,31 +162,12 @@ def _zozo_python(root: Path) -> Path:
     )
 
 
-def _part_ranges(collection: bpy.types.Collection) -> list[_PartRange]:
-    objects = list(participating_parts(collection))
-    if len(objects) < 2:
-        raise KitsukeError("Zero GRAVITY needs at least two pending or completed parts.")
-    ranges: list[_PartRange] = []
-    offset = 0
-    for obj in objects:
-        if any(abs(float(scale) - 1.0) > 1.0e-5 for scale in obj.scale):
-            raise KitsukeError(
-                f"Apply Scale on {obj.name} before Zero GRAVITY; "
-                "moving and rotating are supported, scaling is not."
-            )
-        count = len(obj.data.vertices)
-        locked = bool(obj.get(LOCKED_OBJECT_KEY, False))
-        ranges.append(_PartRange(obj, offset, count, locked))
-        offset += count
-    return ranges
-
-
 def _cloth_geometry(parts: list[_PartRange]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Concatenated world vertices, triangles, and per-vertex Lock flags.
 
     The contact solver simulates triangles, so the panel quads are read
-    through Blender's own triangulation rather than the grainline quad map
-    the square-lattice solver uses for its material metric.
+    through Blender's own triangulation rather than through the grainline
+    quad map, which describes a material metric rather than a surface.
     """
     position_blocks: list[np.ndarray] = []
     face_blocks: list[np.ndarray] = []
@@ -288,7 +268,7 @@ def sew_zero_gravity(
     root = _zozo_root()
     interpreter = _zozo_python(root)
 
-    parts = _part_ranges(collection)
+    parts = part_ranges(collection, "Zero GRAVITY")
     positions, faces, locked, pattern = _cloth_geometry(parts)
     seams = _seam_constraints_from_parts(collection, parts)
     _validate(parts, positions, seams, locked)

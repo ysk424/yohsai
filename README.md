@@ -14,25 +14,25 @@ The N-panel contains these inputs:
 
 - `Pattern Path`: the Illustrator PDF;
 - `Clothes`: the loaded Yohsai collection;
-- `Body`: the fixed collision mesh used by GRAVITY.
+- `Body`: the fixed collision mesh the solver collides cloth against.
 
 The normal operation order is:
 
 1. `Load` creates one Mesh object per pattern panel instance and turns
    `Existing Lock` on.
 2. Translate and rotate the separate parts in Object Mode.
-3. Select the Body, then press `Zero GRAVITY` or `Normal GRAVITY`. Yohsai runs
-   Sewing automatically immediately before the simulation.
-4. Continue placement and use either GRAVITY button in any order.
+3. Select the Body, then press `Zero GRAVITY`. Yohsai runs Sewing
+   automatically immediately before the solve.
+4. Continue placement and press `Zero GRAVITY` again.
 5. Use `Update` after editing the same Illustrator PDF.
 6. For ZOZO simulation, start the ZOZO MCP server on port 9633 and use
    `Prepare for ZOZO` to create an animation hand-off.
 
 Every part has two independent attributes: the monotonic `PLACED` -> `PENDING`
 -> `DONE` state and one deformation Lock. Moving a `PLACED` part makes it
-`PENDING` at the next GRAVITY click and unlocks it; a successful click changes
+`PENDING` at the next Zero GRAVITY press and unlocks it; a successful press changes
 its state to `DONE` without changing that Lock. It therefore remains deformable
-for repeated GRAVITY clicks.
+for repeated Zero GRAVITY presses.
 
 Load turns **Existing Lock** on and locks `PLACED` and existing `DONE` parts;
 pending parts stay unlocked. Turning Existing Lock off unlocks every
@@ -73,7 +73,7 @@ the material rest state.
 
 ## Automatic Sewing
 
-The GRAVITY buttons run Sewing from the world-space positions of the separate
+Zero GRAVITY runs Sewing from the world-space positions of the separate
 source parts before a new pending stage. Sewing orders
 marked boundary paths, matches them by normalized authored distance, and stores
 cross-panel pairs in a transient preview.
@@ -87,51 +87,47 @@ without waiting for later parts.
 The preview is a visual connectivity record. It does not define a replacement
 initial cloth shape. Body geometry is not used by Sewing.
 
-## GRAVITY
+## Zero GRAVITY
 
-GRAVITY starts from the positioned source-panel vertices. The solver is always
-the native Square-Lattice Cloth library; no solver or iteration setup is
+Zero GRAVITY starts from the positioned source-panel vertices and closes every
+seam in one job. The solve runs in the ZOZO Contact Solver's own tree as a child
+process, so its CUDA backend never enters Blender's address space and a solver
+crash costs the press rather than the session. No solver or iteration setup is
 required.
 
-Each click applies:
+The panels start flat and outside the Body, which is what makes the scene
+intersection-free at the start -- the state a barrier solver requires. Because
+they are flat, their placed position is also their stress-free shape, so a press
+always sews from flat: pressing again re-sews rather than advancing, and never
+mistakes stretched cloth for the pattern. Gravity is zero and the Body is a
+static collider with no degrees of freedom.
 
-- existing velocity and downward gravity;
-- a constant-distance positional seam closure and zero-distance capture on
-  explicit seam pairs;
-- authored material-edge stretch, square-cell shear, and weak axial bending;
-- Body contact correction.
+A press is a job of a few seconds rather than a button that answers within a
+frame. `PPF_ZERO_GRAVITY_DESIGN.md` covers the solver hand-off, the mesh rebuild
+it needs, and what is not finished.
 
-Pattern attributes define every material rest value. The render-triangulation
-diagonal carries no spring, and no material term reads Body shape, normals, or
-bones. The Body may influence particles only through collision contact.
+After the solve, positions are scattered back to the separate part objects.
+Object translation and rotation are supported between presses; scaling and
+vertex-count changes are rejected. A result is discarded only when it is
+non-finite, or when it moves a vertex further than the whole Body -- that is a
+failure to locate a vertex, not cloth.
 
-Every click uses eight 1/240-second substeps; Normal GRAVITY uses 16
-material/contact iterations and Zero GRAVITY uses 24 (1.5x). Sewing moves the
-pair kinematically and adds no momentum. `Zero gravity` applies 0 m/s² and
-`Normal gravity` applies 9.81 m/s² in world -Z. The two buttons may be
-alternated without resetting the live simulation. `KITSUKE_DESIGN.md` lists
-every fixed runtime value and the constant that defines it.
-
-After a click, positions are scattered back to the separate part objects. Object
-translation and rotation are supported between clicks; scaling and vertex-count
-changes are rejected. Finite movement is not capped or rolled back; rollback is
-reserved for a non-finite solver state.
-
-On a successful click, pending parts become `DONE` without being relocked, so
-GRAVITY may repeat immediately. Moving another placed part starts a new
+On a successful press, pending parts become `DONE` without being relocked, so
+Zero GRAVITY may repeat immediately. Moving another placed part starts a new
 automatic Sewing stage. A later Load or switching Existing Lock on locks done
 parts while retaining seam connectivity.
 
-Undo and Redo store the solver state needed to reconstruct the live session
-inside the same add-on runtime. Continuing a partially dressed session after
-restarting Blender is unsupported.
+Nothing is kept between presses beyond Blender's own mesh state, so Undo and
+Redo behave as they do for any mesh edit.
 
 ## Prepare for ZOZO
 
-`Prepare for ZOZO` is available after at least one completed GRAVITY step. It
-does not modify, join, rename, hide, or move the source Yohsai parts. Pipeline:
+`Prepare for ZOZO` hands the garment over exactly as it stands. It does not
+sew, open, weld or clear anything, and it does not modify, join, rename, hide,
+or move the source Yohsai parts. Pipeline:
 
-1. Build internal ZOZO **cloth** copy (stitch opening, residual pinch welding).
+1. Build internal ZOZO **cloth** copy: the current panel positions, the seams as
+   stitch edges, the pattern coordinates as UVs.
 2. Build internal ZOZO **body** copy (always; ZOZO MCP / Transfer need it).
 3. **shell-isect check** — default **cloth-only** (fast, practical). Optional
    panel toggle **Shell-isect vs Body** enables the full cloth+body twin
@@ -142,17 +138,19 @@ does not modify, join, rename, hide, or move the source Yohsai parts. Pipeline:
 5. **shell-isect check** again (same mode as step 3).
 6. **NG** — write the error (pair counts + face-pair indices + shell-isect
    version / mode) to the status line, keep cloth/body copies for inspection,
-   **do not** configure ZOZO. Settle with Normal or Zero GRAVITY and press
-   Prepare again.
+   **do not** configure ZOZO. Settle with Zero GRAVITY and press Prepare
+   again.
 7. **PASS** (zero pairs) — configure ZOZO Contact Solver over MCP and leave the
    hand-off ready for Transfer / Run. Status messages end with
    `[shell-isect x.y.z cloth-only]` or `[... cloth+body]`.
 
-ZOZO cannot start with two contact surfaces exactly coincident. On the copy
-only, each loose stitch is opened to at least 2.21 mm: 1.1 times the two 1 mm
-contact gaps plus 0.01 mm. A seam still more than 10 mm open is rejected; use
-Zero GRAVITY to close it first. The original completed garment remains the
-authoritative Yohsai state.
+Earlier versions pushed every seam apart into layers here, because ZOZO's own
+add-on closes a seam with a loose stitch edge and a loose stitch edge needs a
+positive contact gap. That was scaffolding for handing over a garment that was
+not sewn yet. Zero GRAVITY closes the seams before this button is pressed, so
+the scaffolding is gone and the cloth goes over untouched. The status line
+reports the widest seam still open on what was handed over. The Yohsai parts
+remain the authoritative state.
 
 On PASS the button configures ZOZO through `http://localhost:9633/mcp`. It
 replaces only the two groups named for the selected Yohsai collection, creates
@@ -179,8 +177,8 @@ Update rereads the same PDF and recuts the selected Clothes collection. Stable
 `#` labels and mirror instances identify corresponding parts. Existing object
 identity, transforms, materials, and collection ownership remain.
 
-If sewing membership changes, the next eligible GRAVITY click rebuilds Sewing
-automatically. Pattern topology and material rest dimensions always come from
+If sewing membership changes, the next eligible Zero GRAVITY press rebuilds
+Sewing automatically. Pattern topology and material rest dimensions always come from
 the revised PDF.
 
 ## Silhouette utility
@@ -190,10 +188,10 @@ Character silhouettes are exported separately with
 
 ## Documentation
 
-- `SVG_TO_JSON_SPEC.md`: input, JSON, Load, automatic Sewing, GRAVITY, and Update contract;
+- `SVG_TO_JSON_SPEC.md`: input, JSON, Load, automatic Sewing, and Update contract;
 - `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
-- `KITSUKE_DESIGN.md`: simulation workflow, invariants, and every fixed runtime value;
-- `SOLVER_DESIGN.md`: native particle solver and compatibility boundary;
+- `KITSUKE_DESIGN.md`: Sewing, panel state, and what the ZOZO hand-off may do;
+- `PPF_ZERO_GRAVITY_DESIGN.md`: the ZOZO Contact Solver hand-off;
 - `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
 - `SEAM_BOUNDARY_LAYER_DESIGN.md`: seam paving band and E/P/N vertex kinds;
 - `DEVELOPMENT_NOTES.md`: architecture summary and build notes.
@@ -201,21 +199,9 @@ Character silhouettes are exported separately with
 ## Platforms
 
 Yohsai ships for **Windows x64** only (`yohsai-<version>-windows_x64.zip`).
-The package bundles `yohsai_solver.dll`, the licensed `vcomp140.dll` OpenMP
-runtime, and `shell_isect.dll`.
-
-## Native development
-
-Visual Studio 2022 Build Tools and CMake build the solver; the MSVC OpenMP
-runtime is required. CUDA is used for coloured material projections when a
-compiler is present and is switched off automatically when it is not.
-
-```powershell
-.\build_native.ps1 -Configuration Release
-```
-
-The script builds the native library and installs `yohsai_solver.dll` into
-`bin/`.
+The package bundles `shell_isect.dll` and the licensed `vcomp140.dll` OpenMP
+runtime it needs. Zero GRAVITY additionally requires a built ZOZO Contact Solver
+checkout; set its path in Preferences > Add-ons > Yohsai.
 
 ## License
 

@@ -8,18 +8,18 @@ nor the solver, but this add-on replacing the garment's mesh on the way over.
 It no longer does: the solve runs on the mesh Blender has, and reading the
 result back is a lookup.
 
-Zero GRAVITY closes every seam of a garment. It is the one step where the
-square-lattice solver could not be made faster without being made worse:
+Zero GRAVITY closes every seam of a garment. It is the one step where Yohsai's
+own square-lattice solver could not be made faster without being made worse:
 reaching a seam by positional projection ties its stiffness to the iteration
 count, so buying speed costs correctness. The contact solver closes a seam with
 an implicit force solved inside its Newton step, so the result is the converged
 one at any step count. What it costs instead is wall clock — a press is a job of
-tens of seconds, not a button that answers within a frame — so Normal GRAVITY
-and Kitsuke keep the square-lattice solver untouched.
+tens of seconds, not a button that answers within a frame.
 
-Succeeding here removes the ZOZO hand-off entirely: sewing finishes inside
-Yohsai instead of being exported, and the intersection-clearing that the
-hand-off fights goes with it.
+That trade turned out to be worth making everywhere. As of 0.13.0 the
+square-lattice solver is gone: sewing finishes inside Yohsai rather than being
+exported, so the ZOZO hand-off no longer opens, welds or clears anything and
+passes the garment on as it stands.
 
 ## Why it is affordable
 

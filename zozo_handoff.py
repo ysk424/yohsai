@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Create a non-destructive Yohsai hand-off for ZOZO Contact Solver."""
+"""Hand the garment as it stands to ZOZO, and configure ZOZO to receive it.
+
+This used to be the button that sewed.  ZOZO's add-on pulls a seam shut with
+a loose stitch edge, and a loose stitch edge needs a positive contact gap, so
+the hand-off pushed every seam apart into layers first -- a graph colouring
+over each seam component, a spacing per layer, and a weld for the pinch
+points the layering could not open.  All of that was scaffolding for handing
+over cloth that was not sewn yet.
+
+Zero GRAVITY sews before this button is ever pressed, so there is nothing
+left to open.  What goes over now is the garment exactly as it stands: the
+panels' current world positions, their seams as stitch edges, their pattern
+coordinates as UVs, and a copy of the Body.  Moving good cloth on the way out
+could only make it worse.
+
+Yohsai's own objects are never touched -- ZOZO gets copies, in a collection
+of its own.
+"""
 
 from __future__ import annotations
 
@@ -8,20 +25,13 @@ import re
 
 import bpy
 import numpy as np
-from mathutils import Vector
-from mathutils.bvhtree import BVHTree
 
-from .kitsuke import KitsukeError, completed_kitsuke_handoff
+from .kitsuke import KitsukeError, _seam_constraints_from_parts, part_ranges
 from .shell_isect_bridge import ShellIsectReport, run_check_and_fix
 
 
 ZOZO_MCP_PORT = 9633
 ZOZO_CONTACT_GAP_M = 0.001
-# ZOZO keeps a loose stitch edge open by 1.1 * (gap_a + gap_b) + 1e-5.
-ZOZO_STITCH_OPENING_M = 1.1 * (2.0 * ZOZO_CONTACT_GAP_M) + 1.0e-5
-MAX_HANDOFF_SEAM_DISTANCE_M = 0.01
-# Body clearance used when opening stitch layers away from the collider surface.
-_BODY_CLEARANCE_M = 1.1 * ZOZO_CONTACT_GAP_M
 _HANDOFF_COLLECTION_ROLE = "zozo_handoff"
 _HANDOFF_CLOTH_ROLE = "zozo_cloth"
 _HANDOFF_BODY_ROLE = "zozo_body"
@@ -37,8 +47,9 @@ class ZozoPreparation:
     cloth_object: bpy.types.Object
     body_object: bpy.types.Object | None
     seam_count: int
-    maximum_input_seam_distance_m: float
-    minimum_output_seam_distance_m: float
+    # The widest seam still open on the cloth being handed over: how well sewn
+    # the garment ZOZO receives actually is.
+    seam_distance_max_m: float
     cloth_group_name: str
     body_group_name: str
     project_name: str
@@ -154,162 +165,6 @@ def _world_vertices(obj: bpy.types.Object) -> np.ndarray:
     obj.data.vertices.foreach_get("co", local.ravel())
     matrix = np.asarray([tuple(row) for row in obj.matrix_world], dtype=np.float64)
     return np.ascontiguousarray(local @ matrix[:3, :3].T + matrix[:3, 3])
-
-
-def _evaluated_body_bvh(context, body: bpy.types.Object) -> tuple[BVHTree, np.ndarray]:
-    depsgraph = context.evaluated_depsgraph_get()
-    evaluated = body.evaluated_get(depsgraph)
-    mesh = evaluated.to_mesh()
-    try:
-        if not mesh.vertices or not mesh.polygons:
-            raise ZozoHandoffError("The selected Body needs a surface mesh for ZOZO contact.")
-        matrix = evaluated.matrix_world
-        vertices = [matrix @ vertex.co for vertex in mesh.vertices]
-        faces = [tuple(polygon.vertices) for polygon in mesh.polygons]
-        bvh = BVHTree.FromPolygons(vertices, faces, all_triangles=False)
-        if bvh is None:
-            raise ZozoHandoffError("The selected Body could not be converted to a contact surface.")
-        centroid = np.mean(np.asarray([tuple(point) for point in vertices], dtype=np.float64), axis=0)
-        return bvh, centroid
-    finally:
-        evaluated.to_mesh_clear()
-
-
-def _component_normal(
-    bvh: BVHTree,
-    body_centroid: np.ndarray,
-    positions: np.ndarray,
-    component: list[int],
-) -> tuple[np.ndarray, float]:
-    center = np.mean(positions[component], axis=0)
-    nearest = bvh.find_nearest(Vector(center))
-    if nearest is not None:
-        location, surface_normal, _face_index, _distance = nearest
-        normal = np.asarray(tuple(surface_normal), dtype=np.float64)
-        normal_length = float(np.linalg.norm(normal))
-        if normal_length > 1.0e-10:
-            normal /= normal_length
-            toward_cloth = center - np.asarray(tuple(location), dtype=np.float64)
-            if float(np.dot(toward_cloth, normal)) < 0.0:
-                normal *= -1.0
-        else:
-            normal = center - body_centroid
-    else:
-        normal = center - body_centroid
-    length = float(np.linalg.norm(normal))
-    if length <= 1.0e-10:
-        normal = np.asarray((0.0, 0.0, 1.0), dtype=np.float64)
-    else:
-        normal /= length
-
-    minimum_distance = float("inf")
-    for vertex_index in component:
-        hit = bvh.find_nearest(Vector(positions[vertex_index]))
-        if hit is not None:
-            minimum_distance = min(minimum_distance, float(hit[3]))
-    return normal, minimum_distance
-
-
-def _seam_components(seams: np.ndarray) -> tuple[dict[int, set[int]], list[list[int]]]:
-    adjacency: dict[int, set[int]] = {}
-    for a_value, b_value in seams:
-        a, b = int(a_value), int(b_value)
-        adjacency.setdefault(a, set()).add(b)
-        adjacency.setdefault(b, set()).add(a)
-    components: list[list[int]] = []
-    remaining = set(adjacency)
-    while remaining:
-        start = min(remaining)
-        stack = [start]
-        component: list[int] = []
-        remaining.remove(start)
-        while stack:
-            vertex = stack.pop()
-            component.append(vertex)
-            for neighbor in sorted(adjacency[vertex], reverse=True):
-                if neighbor in remaining:
-                    remaining.remove(neighbor)
-                    stack.append(neighbor)
-        components.append(sorted(component))
-    return adjacency, components
-
-
-def _greedy_colors(adjacency: dict[int, set[int]], component: list[int]) -> dict[int, int]:
-    """Color one local stitch graph so every loose edge gets a positive gap."""
-    colors: dict[int, int] = {}
-    # High-degree vertices first keeps unequal seam samplings at two layers in
-    # the common case, while still handling an occasional three-way junction.
-    for vertex in sorted(component, key=lambda item: (-len(adjacency[item]), item)):
-        used = {colors[neighbor] for neighbor in adjacency[vertex] if neighbor in colors}
-        color = 0
-        while color in used:
-            color += 1
-        colors[vertex] = color
-    return colors
-
-
-def _open_stitches(
-    positions: np.ndarray,
-    seams: np.ndarray,
-    bvh: BVHTree,
-    body_centroid: np.ndarray,
-) -> tuple[np.ndarray, float, float]:
-    before = np.linalg.norm(positions[seams[:, 0]] - positions[seams[:, 1]], axis=1)
-    maximum_before = float(np.max(before)) if before.size else 0.0
-
-    # Matched 1:1 gather sewing closes every seam except a few isolated pinch
-    # points (shoulder / underarm) where the body sits between the two sides and
-    # holds them apart.  Those residual pairs are excluded from the ZOZO stitch
-    # opening below and welded shut afterwards, so they play no part in the layer
-    # spacing of their neighbours.
-    residual = np.nonzero(before > MAX_HANDOFF_SEAM_DISTANCE_M)[0]
-    open_seams = np.delete(seams, residual, axis=0)
-
-    result = positions.copy()
-    adjacency, components = _seam_components(open_seams)
-    for component in components:
-        normal, minimum_body_distance = _component_normal(
-            bvh, body_centroid, result, component
-        )
-        colors = _greedy_colors(adjacency, component)
-        component_set = set(component)
-        projections = [
-            abs(float(np.dot(result[int(b)] - result[int(a)], normal)))
-            for a, b in open_seams
-            if int(a) in component_set
-        ]
-        layer_spacing = ZOZO_STITCH_OPENING_M + max(projections, default=0.0)
-        clearance = (
-            max(0.0, _BODY_CLEARANCE_M - minimum_body_distance)
-            if np.isfinite(minimum_body_distance)
-            else 0.0
-        )
-        for vertex in component:
-            result[vertex] += normal * (clearance + colors[vertex] * layer_spacing)
-
-    # Fill each residual pinch hole by welding its pair onto whichever endpoint
-    # sits farther outside the body, so the adjacent panel triangles stretch
-    # across the gap without bending the panels or being driven into the body.
-    # Like a real 2 mm stitch line this is not perfect, which is fine for a
-    # garment.
-    for index in residual:
-        first, second = int(seams[index, 0]), int(seams[index, 1])
-        _, _, _, distance_first = bvh.find_nearest(Vector(result[first]))
-        _, _, _, distance_second = bvh.find_nearest(Vector(result[second]))
-        anchor = first if (distance_first or 0.0) >= (distance_second or 0.0) else second
-        result[first] = result[anchor]
-        result[second] = result[anchor]
-
-    if open_seams.size:
-        after = np.linalg.norm(result[open_seams[:, 0]] - result[open_seams[:, 1]], axis=1)
-        minimum_after = float(np.min(after))
-        if minimum_after + 1.0e-8 < ZOZO_STITCH_OPENING_M:
-            raise ZozoHandoffError(
-                "Could not create a positive ZOZO contact gap at every sewing edge."
-            )
-    else:
-        minimum_after = ZOZO_STITCH_OPENING_M
-    return result, maximum_before, minimum_after
 
 
 def _pattern_positions(obj: bpy.types.Object) -> list[tuple[float, float]]:
@@ -451,7 +306,6 @@ def _create_cloth_object(
         cloth["yohsai_source_collection"] = source.name
         cloth["yohsai_source_parts"] = [part.name for part in parts]
         cloth["yohsai_zozo_contact_gap_m"] = ZOZO_CONTACT_GAP_M
-        cloth["yohsai_zozo_stitch_opening_m"] = ZOZO_STITCH_OPENING_M
         return cloth
     except Exception:
         _remove_object_and_owned_mesh(cloth)
@@ -495,6 +349,13 @@ def prepare_for_zozo(
 ) -> ZozoPreparation:
     """Create solver-owned cloth/body copies and leave Yohsai untouched.
 
+    The cloth is the garment as it stands right now, read the same way Zero
+    GRAVITY reads it: the participating panels, in their panel order, at their
+    current world positions, with the seams the verified Sewing plan names.
+    Reading it from a stored solver state instead would hand ZOZO whichever
+    garment that solver last finished, which is not necessarily the one on
+    screen.
+
     ``shell_isect_include_body`` enables the full cloth+body twin check (slow on
     high-poly characters). Default is cloth-only shell-isect for practical time;
     the body copy is still built for ZOZO MCP / Transfer.
@@ -503,21 +364,23 @@ def prepare_for_zozo(
         raise ZozoHandoffError("Select a loaded Yohsai Clothes collection first.")
     if body is None or body.type != "MESH":
         raise ZozoHandoffError("Select a mesh Body before Prepare for ZOZO.")
+    context.view_layer.update()
     try:
-        parts, seams = completed_kitsuke_handoff(collection)
+        ranges = part_ranges(collection, "Prepare for ZOZO")
+        seams = _seam_constraints_from_parts(collection, ranges)
     except KitsukeError as exc:
         raise ZozoHandoffError(str(exc)) from exc
     if seams.size == 0:
-        raise ZozoHandoffError("The completed GRAVITY state has no sewing edges.")
+        raise ZozoHandoffError("The garment has no sewing edges.")
 
-    context.view_layer.update()
+    parts = [part.obj for part in ranges]
     positions = np.concatenate([_world_vertices(part) for part in parts])
     if not np.all(np.isfinite(positions)):
-        raise ZozoHandoffError("The completed cloth contains a non-finite vertex position.")
-    bvh, body_centroid = _evaluated_body_bvh(context, body)
-    positions, maximum_before, minimum_after = _open_stitches(
-        positions, seams, bvh, body_centroid
-    )
+        raise ZozoHandoffError("The cloth contains a non-finite vertex position.")
+    if seams.min() < 0 or seams.max() >= len(positions):
+        raise ZozoHandoffError("The sewing pairs do not match the current panel vertices.")
+    gaps = np.linalg.norm(positions[seams[:, 0]] - positions[seams[:, 1]], axis=1)
+    seam_distance_max = float(np.max(gaps))
 
     handoff = _handoff_collection(context, collection)
     cloth = _create_cloth_object(handoff, collection, parts, positions, seams)
@@ -576,8 +439,7 @@ def prepare_for_zozo(
             cloth_object=cloth,
             body_object=body_copy,
             seam_count=len(seams),
-            maximum_input_seam_distance_m=maximum_before,
-            minimum_output_seam_distance_m=minimum_after,
+            seam_distance_max_m=seam_distance_max,
             cloth_group_name=cloth_group_name,
             body_group_name=body_group_name,
             project_name=_project_name(collection.name),
@@ -590,8 +452,7 @@ def prepare_for_zozo(
         cloth_object=cloth,
         body_object=body_copy,
         seam_count=len(seams),
-        maximum_input_seam_distance_m=maximum_before,
-        minimum_output_seam_distance_m=minimum_after,
+        seam_distance_max_m=seam_distance_max,
         cloth_group_name=cloth_group_name,
         body_group_name=body_group_name,
         project_name=_project_name(collection.name),

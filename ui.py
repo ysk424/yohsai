@@ -11,7 +11,6 @@ import tomllib
 from pathlib import Path
 
 import bpy
-from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, PointerProperty, StringProperty
 from bpy.types import (
     AddonPreferences,
@@ -23,17 +22,7 @@ from bpy.types import (
 )
 
 from .i18n import translations_dict
-from .kitsuke import (
-    KitsukeError,
-    NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
-    SOLVER_ITERATIONS,
-    adapt_seam_counts,
-    advance_kitsuke,
-    clear_kitsuke_session,
-    clear_sessions,
-    has_kitsuke_session,
-    reset_runtime_epoch,
-)
+from .kitsuke import KitsukeError, adapt_seam_counts
 from . import ppf_zero_gravity
 from .ppf_zero_gravity import SETTLE_FRAMES, SEWING_FRAMES, sew_zero_gravity
 from .mesh_loader import (
@@ -64,34 +53,6 @@ _PARSER_FILENAME = "yohsai_svg_parser.py"
 _JSON_FILENAME = "yohsai_pattern.json"
 _ZOZO_CLIENT_FILENAME = "zozo_mcp_client.py"
 _ZOZO_CONFIG_FILENAME = "zozo_mcp_config.json"
-
-
-@persistent
-def _history_change_post(_unused) -> None:
-    """Discard non-undoable solver objects after Blender restores its data."""
-    clear_sessions()
-
-
-@persistent
-def _file_load_pre(_unused) -> None:
-    """Give every loaded file a new recovery epoch and no stale solver objects."""
-    reset_runtime_epoch()
-
-
-def _register_history_handlers() -> None:
-    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
-        if _history_change_post not in handlers:
-            handlers.append(_history_change_post)
-    if _file_load_pre not in bpy.app.handlers.load_pre:
-        bpy.app.handlers.load_pre.append(_file_load_pre)
-
-
-def _unregister_history_handlers() -> None:
-    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
-        if _history_change_post in handlers:
-            handlers.remove(_history_change_post)
-    if _file_load_pre in bpy.app.handlers.load_pre:
-        bpy.app.handlers.load_pre.remove(_file_load_pre)
 
 
 def _version() -> str:
@@ -327,10 +288,9 @@ def _poll_svg_parser() -> float | None:
         if _parse_action == "UPDATE":
             clothes_collection = bpy.data.collections.get(_parse_collection_name) if _parse_collection_name else None
             sewing_changed, vertex_count = update_clothes_mesh(bpy.context, clothes_collection, validated_document)
-            clear_kitsuke_session(clothes_collection)
             message = f"Updated {clothes_collection.name}: {vertex_count} vertices"
             if sewing_changed:
-                message += "; Sewing will rebuild on GRAVITY"
+                message += "; Sewing will rebuild on Zero GRAVITY"
             _set_parse_status(message)
         else:
             clothes_collection = create_clothes_mesh(bpy.context, validated_document)
@@ -719,12 +679,8 @@ class YOHSAI_OT_update_svg(Operator):
         return {"FINISHED"}
 
 
-def _prepare_gravity(context, collection) -> tuple[Object, ...]:
-    """Bring seams and the Sewing plan up to date before a solver runs.
-
-    Both GRAVITY buttons need the same starting state, so this is shared;
-    only the solve that follows differs.
-    """
+def _prepare_sewing(context, collection) -> tuple[Object, ...]:
+    """Bring seams and the Sewing plan up to date before the solver runs."""
     # Gather seams: recut any sewing seam whose two sides carry unequal
     # vertex counts so they can pair 1:1.  This changes topology on the
     # affected panels, so force a sewing rebuild below.
@@ -732,9 +688,8 @@ def _prepare_gravity(context, collection) -> tuple[Object, ...]:
         collection["yohsai_sewing_verified"] = False
 
     pending_parts = mark_moved_parts_pending(collection)
-    sewing_required = bool(pending_parts) or (
-        not has_kitsuke_session(collection)
-        and not bool(collection.get("yohsai_sewing_verified", False))
+    sewing_required = bool(pending_parts) or not bool(
+        collection.get("yohsai_sewing_verified", False)
     )
     if sewing_required:
         if not pending_parts and len(participating_parts(collection)) < 2:
@@ -744,54 +699,14 @@ def _prepare_gravity(context, collection) -> tuple[Object, ...]:
         # locked anchors when Auto is on.  A changed Update signature also
         # rebuilds from completed participants so the hidden Sewing action
         # is never required for recovery.
-        clear_kitsuke_session(collection)
         remove_sewn_preview(collection, reveal_parts=True)
         collection["yohsai_sewing_verified"] = False
         create_sewn_mesh(context, collection)
     return pending_parts
 
 
-def _run_gravity(
-    operator: Operator,
-    context,
-    gravity_magnitude: float,
-    solver_iterations: int = SOLVER_ITERATIONS,
-):
-    props = context.scene.yohsai
-    collection = props.clothes_collection
-    pending_parts: tuple[Object, ...] = ()
-    try:
-        if collection is None or collection.get("yohsai_role") != "clothes":
-            raise KitsukeError("No loaded Yohsai clothes collection is selected.")
-        if props.body_object is None:
-            raise KitsukeError("Select a mesh Body before pressing GRAVITY.")
-
-        pending_parts = _prepare_gravity(context, collection)
-        message = advance_kitsuke(
-            context,
-            collection,
-            props.body_object,
-            gravity_magnitude,
-            solver_iterations,
-        )
-        mark_pending_parts_done(pending_parts)
-    except Exception as exc:
-        message = str(exc).strip() or type(exc).__name__
-        props.parse_status = f"GRAVITY failed: {message[:240]}"
-        operator.report({"ERROR"}, message)
-        return {"CANCELLED"}
-    props.parse_status = message
-    operator.report({"INFO"}, message)
-    return {"FINISHED"}
-
-
 def _run_zero_gravity(operator: Operator, context):
-    """Sew every seam in one contact-solver job.
-
-    The square-lattice session is dropped first: it holds cloth state this
-    solve replaces wholesale, and keeping a stale one would let the next
-    Normal GRAVITY press continue from cloth it never simulated.
-    """
+    """Sew every seam in one contact-solver job."""
     props = context.scene.yohsai
     collection = props.clothes_collection
     pending_parts: tuple[Object, ...] = ()
@@ -801,8 +716,7 @@ def _run_zero_gravity(operator: Operator, context):
         if props.body_object is None:
             raise KitsukeError("Select a mesh Body before pressing Zero GRAVITY.")
 
-        pending_parts = _prepare_gravity(context, collection)
-        clear_kitsuke_session(collection)
+        pending_parts = _prepare_sewing(context, collection)
         remove_sewn_preview(collection, reveal_parts=True)
         message = sew_zero_gravity(context, collection, props.body_object)
         mark_pending_parts_done(pending_parts)
@@ -835,28 +749,14 @@ class YOHSAI_OT_kitsuke_zero_gravity(Operator):
         return _run_zero_gravity(self, context)
 
 
-class YOHSAI_OT_kitsuke(Operator):
-    bl_idname = "yohsai.kitsuke"
-    bl_label = "Normal GRAVITY"
-    bl_description = "Run automatic Sewing, then advance with normal gravity (9.81 m/s²)"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        return context.mode == "OBJECT"
-
-    def execute(self, context):
-        return _run_gravity(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED, SOLVER_ITERATIONS)
-
-
 class YOHSAI_OT_prepare_zozo(Operator):
     bl_idname = "yohsai.prepare_zozo"
     bl_label = "Prepare for ZOZO"
     bl_description = (
-        "Build ZOZO cloth/body copies, run shell-isect check→fix→check "
-        "(cloth-only by default; enable Shell-isect vs Body for full twin); "
-        f"on PASS start ZOZO MCP if needed and configure on port {ZOZO_MCP_PORT}. "
-        "On NG, stop and report"
+        "Copy the garment as it stands into ZOZO cloth/body objects, run "
+        "shell-isect check→fix→check (cloth-only by default; enable Shell-isect "
+        "vs Body for full twin); on PASS start ZOZO MCP if needed and configure "
+        f"on port {ZOZO_MCP_PORT}. On NG, stop and report"
     )
     bl_options = {"REGISTER"}
 
@@ -902,7 +802,7 @@ class YOHSAI_OT_prepare_zozo(Operator):
         # Triangle self-intersection already gated by shell-isect; MCP only.
         summary = (
             f"Prepared {prepared.seam_count} ZOZO stitches "
-            f"(minimum {prepared.minimum_output_seam_distance_m * 1000.0:.2f} mm)"
+            f"(widest seam still open {prepared.seam_distance_max_m * 1000.0:.2f} mm)"
             + shell_suffix
         )
         try:
@@ -971,9 +871,7 @@ class YOHSAI_PT_main(Panel):
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
         actions.operator(YOHSAI_OT_update_svg.bl_idname, text="Update")
-        gravity_actions = actions.row(align=True)
-        gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
-        gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal GRAVITY")
+        actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
         actions.operator(YOHSAI_OT_prepare_zozo.bl_idname, text="Prepare for ZOZO")
         actions.prop(props, "shell_isect_include_body", text="Shell-isect vs Body")
         layout.separator(factor=0.5)
@@ -1007,7 +905,6 @@ _classes = (
     YOHSAI_OT_update_svg,
     YOHSAI_OT_lock_selection,
     YOHSAI_OT_kitsuke_zero_gravity,
-    YOHSAI_OT_kitsuke,
     YOHSAI_OT_prepare_zozo,
     YOHSAI_PT_main,
 )
@@ -1017,15 +914,12 @@ def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.yohsai = PointerProperty(type=YohsaiProperties)
-    _register_history_handlers()
     bpy.app.translations.register(__package__, translations_dict)
 
 
 def unregister():
     global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
     bpy.app.translations.unregister(__package__)
-    _unregister_history_handlers()
-    reset_runtime_epoch()
     if bpy.app.timers.is_registered(_poll_svg_parser):
         bpy.app.timers.unregister(_poll_svg_parser)
     if bpy.app.timers.is_registered(_poll_zozo_mcp):
