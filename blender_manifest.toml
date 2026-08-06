@@ -44,7 +44,6 @@ paths = [
     "GRAINLINE_DESIGN.md",
     "SEAM_BOUNDARY_LAYER_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",
-    "DESIGN_PHILOSOPHY.md",
     "README.md",
     "DEVELOPMENT_NOTES.md",
     "UTIL/silhouette_export.py",

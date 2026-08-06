@@ -189,9 +189,9 @@ Character silhouettes are exported separately with
 ## Documentation
 
 - `SVG_TO_JSON_SPEC.md`: input, JSON, Load, automatic Sewing, and Update contract;
-- `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
 - `KITSUKE_DESIGN.md`: Sewing, panel state, and what the ZOZO hand-off may do;
 - `PPF_ZERO_GRAVITY_DESIGN.md`: the ZOZO Contact Solver hand-off;
+- `ZOZO_HANDOFF_DESIGN.md`: what Prepare for ZOZO re-cuts and checks, and why;
 - `GRAINLINE_DESIGN.md`: grain-aligned mesh and material mapping;
 - `SEAM_BOUNDARY_LAYER_DESIGN.md`: seam paving band and E/P/N vertex kinds;
 - `DEVELOPMENT_NOTES.md`: architecture summary and build notes.
