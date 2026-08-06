@@ -84,6 +84,17 @@ it ships no resolver. Detection and repair both live in the external
 `shell_isect_bridge.py` owns the stage contract. Yohsai never edits topology or
 body vertices to satisfy the check.
 
+The check that matters is cloth against the Body, because that is what ZOZO
+counts and cloth-only cannot see it: on the reference garment cloth × cloth is
+0 and cloth × Body is 28. It used to be off by default, because
+`shell_isect_check` takes one mesh and finds every self-intersection in it, so
+handing it cloth and Body concatenated made it test the Body against itself —
+203 s of a 207 s run, for 5943 pairs that ZOZO skips as well. The Body is now
+cropped before the call to the triangles whose bounding boxes share a grid cell
+with a cloth triangle's, which cannot lose a cloth–Body pair because a triangle
+cannot leave its own bounding box. The whole CHECK → FIX → CHECK is 26 s, and
+the result was confirmed against the uncropped 449k-triangle Body.
+
 Zero GRAVITY has its own, separate clearing step (`ppf_clear.py`), which runs
 inside the solver process on the solver's own copy of the mesh and never on
 Blender's. The two are not a pipeline and do not share constants; see

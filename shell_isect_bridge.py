@@ -18,14 +18,25 @@ When CHECK 1 is already clean, FIX is skipped and CHECK 2 is not required
 always runs and CHECK 2 always runs afterward — even if FIX is NOOP — so
 debug always sees two independent checker results around the fix.
 
-**Default (practical):** cloth-only shell-isect (``include_body=False``).
-High-poly CC bodies make cloth+body twin checks take many minutes; the body
-path remains fully implemented and is enabled only when the operator requests
-it (UI: "Shell-isect vs Body").
+Full ZOZO-twin mode (``include_body=True``, the default) matches Transfer-time
+colliders (ppf ``fixed_scene_assemble``): cloth–cloth and cloth–body pairs
+count; body–body pairs are skipped.
 
-Full ZOZO-twin mode (``include_body=True``) matches Transfer-time colliders
-(ppf ``fixed_scene_assemble``): cloth–cloth and cloth–body pairs count;
-body–body pairs are skipped.
+**Only the body under the garment is handed to the DLL.** ``shell_isect_check``
+takes one mesh and finds every self-intersection in it, so concatenating cloth
+and body makes it test the body against itself as well. On the reference
+character that is the whole cost: the body's own self-test is 203 s of a 207 s
+run, and every one of the 5943 pairs it produces is then discarded, because
+ZOZO skips collider × collider too. The DLL cannot be told otherwise -- it
+exports no group or mask argument -- so the body is cropped here, before the
+call, to the triangles whose bounding boxes share a grid cell with a cloth
+triangle's. A triangle cannot leave its own bounding box, so no cloth–body pair
+can be lost; measured on the reference garment the crop keeps 12% of the body,
+returns the same 28 pairs face-for-face, and takes 5.6 s instead of 207 s.
+
+That is what makes ``include_body`` affordable enough to be the default. It was
+off because it cost minutes, which meant the check that matters -- cloth against
+the collider it will actually be solved against -- was the one nobody ran.
 
 Environment:
   SHELL_ISECT_DLL  full path to shell_isect.dll (Windows) / libshell_isect.so
@@ -54,6 +65,14 @@ _LOCAL_BODY_CLEARANCE_M = 0.0011
 _LOCAL_BODY_PAD_M = 0.0005
 _LOCAL_FIX_MAX_PASSES = 8
 _LOCAL_CLOTH_SEPARATION_M = 0.0008
+# Broad-phase cell for cropping the body. Only speed depends on it; the test is
+# bounding-box against cell either way, so correctness does not.
+_CROP_CELL_M = 0.01
+_CROP_BASE = 1 << 12
+_CROP_HALF = _CROP_BASE // 2
+# Pair buffer asked for on the first checker call. Big enough that a real scene
+# never needs the overflow retry, small enough to allocate without thinking.
+_PAIR_BUDGET = 1 << 16
 
 
 @dataclass(frozen=True)
@@ -78,6 +97,10 @@ class ShellIsectReport:
     checks_run: int = 0
     # True when the full check→fix→check path ran (CHECK 1 found pairs).
     fix_attempted: bool = False
+    # Body triangles actually handed to the DLL, and how many the body has.
+    # The gap between them is the crop, and it is the whole runtime story.
+    body_faces_tested: int = 0
+    body_faces_total: int = 0
 
     @property
     def passed(self) -> bool:
@@ -106,7 +129,12 @@ class ShellIsectReport:
         if not self.available:
             return f"shell-isect: {self.message}"
         mode = "cloth+body" if self.include_body else "cloth-only"
-        return f"shell-isect {self.version} ({mode}): {self.pipeline_token()}"
+        crop = ""
+        if self.include_body and self.body_faces_total:
+            crop = (
+                f", body {self.body_faces_tested}/{self.body_faces_total} tris"
+            )
+        return f"shell-isect {self.version} ({mode}{crop}): {self.pipeline_token()}"
 
     def _format_face(self, index: int) -> str:
         n = self.n_cloth_faces
@@ -265,33 +293,145 @@ def _mesh_arrays_world(obj: bpy.types.Object) -> tuple[np.ndarray, np.ndarray]:
     return verts, faces
 
 
+@dataclass(frozen=True)
+class _BodyProxy:
+    """The part of the STATIC body that could possibly touch the cloth.
+
+    ``face_index`` maps each proxy triangle back to its index in the whole
+    body, so a reported pair still names a triangle the operator can find.
+    """
+
+    verts: np.ndarray
+    faces: np.ndarray
+    face_index: np.ndarray
+    kept: int
+    total: int
+
+
+def _cell_keys(triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+    """(triangle index, packed cell) for every cell a triangle's box touches.
+
+    Returns ``None`` for the keys when the mesh lies outside the packing range,
+    which is the signal to skip cropping rather than crop wrongly.
+    """
+    low = np.floor(triangles.min(axis=1) / _CROP_CELL_M).astype(np.int64)
+    high = np.floor(triangles.max(axis=1) / _CROP_CELL_M).astype(np.int64)
+    if len(low) and max(abs(int(low.min())), abs(int(high.max()))) >= _CROP_HALF - 1:
+        return np.zeros(0, dtype=np.int64), None
+    span = high - low + 1
+    counts = span.prod(axis=1)
+    index = np.repeat(np.arange(len(triangles), dtype=np.int64), counts)
+    starts = np.concatenate([np.zeros(1, dtype=np.int64), counts.cumsum()[:-1]])
+    within = np.arange(int(counts.sum()), dtype=np.int64) - np.repeat(starts, counts)
+    span_y, span_z = span[index, 1], span[index, 2]
+    x = low[index, 0] + within // (span_y * span_z)
+    y = low[index, 1] + (within // span_z) % span_y
+    z = low[index, 2] + within % span_z
+    return index, ((x + _CROP_HALF) * _CROP_BASE + (y + _CROP_HALF)) * _CROP_BASE + (
+        z + _CROP_HALF
+    )
+
+
+def _body_faces_near_cloth(
+    cloth_triangles: np.ndarray, body_triangles: np.ndarray
+) -> np.ndarray:
+    """Body triangles whose box shares a cell with some cloth triangle's box.
+
+    Conservative: two triangles that cross each other must share a cell, so
+    this can keep a triangle that turns out not to cross and can never drop one
+    that does. The cloth cells are grown by one ring first, which leaves a cell
+    of slack for the local fix to push cloth into without re-cropping.
+    """
+    total = int(body_triangles.shape[0])
+    if not total or not len(cloth_triangles):
+        return np.ones(total, dtype=bool)
+    _cloth_index, cloth_keys = _cell_keys(cloth_triangles)
+    body_index, body_keys = _cell_keys(body_triangles)
+    if cloth_keys is None or body_keys is None:
+        return np.ones(total, dtype=bool)
+    ring = np.asarray(
+        [
+            (dx * _CROP_BASE + dy) * _CROP_BASE + dz
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for dz in (-1, 0, 1)
+        ],
+        dtype=np.int64,
+    )
+    wanted = np.unique((np.unique(cloth_keys)[:, None] + ring[None, :]).ravel())
+    keep = np.zeros(total, dtype=bool)
+    keep[body_index[np.isin(body_keys, wanted)]] = True
+    return keep
+
+
+def _body_proxy(
+    cloth_verts: np.ndarray, cloth_faces: np.ndarray, body: bpy.types.Object
+) -> _BodyProxy | None:
+    body_verts, body_faces = _mesh_arrays_world(body)
+    if body_faces.shape[0] == 0:
+        return None
+    keep = _body_faces_near_cloth(cloth_verts[cloth_faces], body_verts[body_faces])
+    subset = body_faces[keep]
+    used = np.unique(subset)
+    remap = np.full(body_verts.shape[0], -1, dtype=np.int64)
+    remap[used] = np.arange(used.shape[0], dtype=np.int64)
+    return _BodyProxy(
+        verts=np.ascontiguousarray(body_verts[used], dtype=np.float64),
+        faces=np.ascontiguousarray(remap[subset], dtype=np.int32).reshape((-1, 3)),
+        face_index=np.flatnonzero(keep).astype(np.int64),
+        kept=int(keep.sum()),
+        total=int(body_faces.shape[0]),
+    )
+
+
 def _combined_cloth_body_arrays(
-    cloth: bpy.types.Object,
-    body: bpy.types.Object,
+    cloth_verts: np.ndarray,
+    cloth_faces: np.ndarray,
+    proxy: _BodyProxy | None,
 ) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
-    """Build PPF-style combined mesh: cloth faces then body faces.
+    """Build the PPF-style combined mesh: cloth faces, then proxy body faces.
 
     Returns (verts, faces, n_cloth_faces, is_collider) where is_collider is
     uint8 length n_faces (0 = dynamic cloth, 1 = static body).
     """
-    c_verts, c_faces = _mesh_arrays_world(cloth)
-    b_verts, b_faces = _mesh_arrays_world(body)
-    n_cloth_faces = int(c_faces.shape[0])
-    n_cloth_verts = int(c_verts.shape[0])
-    if b_faces.shape[0] == 0:
-        is_collider = np.zeros((n_cloth_faces,), dtype=np.uint8)
-        return c_verts, c_faces, n_cloth_faces, is_collider
-
-    verts = np.ascontiguousarray(np.vstack([c_verts, b_verts]), dtype=np.float64)
-    shifted = b_faces + np.int32(n_cloth_verts)
-    faces = np.ascontiguousarray(np.vstack([c_faces, shifted]), dtype=np.int32)
+    n_cloth_faces = int(cloth_faces.shape[0])
+    if proxy is None or proxy.faces.shape[0] == 0:
+        return (
+            cloth_verts,
+            cloth_faces,
+            n_cloth_faces,
+            np.zeros((n_cloth_faces,), dtype=np.uint8),
+        )
+    verts = np.ascontiguousarray(
+        np.vstack([cloth_verts, proxy.verts]), dtype=np.float64
+    )
+    shifted = proxy.faces + np.int32(cloth_verts.shape[0])
+    faces = np.ascontiguousarray(np.vstack([cloth_faces, shifted]), dtype=np.int32)
     is_collider = np.concatenate(
         [
             np.zeros((n_cloth_faces,), dtype=np.uint8),
-            np.ones((b_faces.shape[0],), dtype=np.uint8),
+            np.ones((proxy.faces.shape[0],), dtype=np.uint8),
         ]
     )
     return verts, faces, n_cloth_faces, is_collider
+
+
+def _restore_body_faces(
+    pairs: tuple[tuple[int, int], ...],
+    n_cloth_faces: int,
+    proxy: _BodyProxy | None,
+) -> tuple[tuple[int, int], ...]:
+    """Rename proxy body faces back to their index in the whole body."""
+    if proxy is None or not pairs:
+        return pairs
+
+    def rename(index: int) -> int:
+        local = index - n_cloth_faces
+        if local < 0 or local >= proxy.face_index.shape[0]:
+            return index
+        return n_cloth_faces + int(proxy.face_index[local])
+
+    return tuple((rename(a), rename(b)) for a, b in pairs)
 
 
 def _apply_world_verts(cloth: bpy.types.Object, world_verts: np.ndarray) -> None:
@@ -373,28 +513,38 @@ def _check_pairs(
     if is_collider is None:
         return _raw_check_pairs(lib, verts, faces, max_pairs=max_pairs)
 
-    # Need every raw pair before filtering; body self-hits can fill a small buffer.
-    total, _, rc = _raw_check_pairs(lib, verts, faces, max_pairs=0)
+    # Filtering needs the raw pairs, so ask for a buffer rather than a count and
+    # a second identical run: on the twin mesh each run is the expensive part,
+    # and counting first doubled it. Only a buffer that actually overflowed
+    # needs asking again -- collider self-hits could otherwise crowd out the
+    # cloth pairs that were the point of the call.
+    budget = max(int(max_pairs), _MAX_REPORT_PAIRS, _PAIR_BUDGET)
+    total, raw_pairs, rc = _raw_check_pairs(lib, verts, faces, max_pairs=budget)
     if rc not in (0, 2):
         return total, (), rc
-    if total <= 0:
-        return 0, (), rc
-    raw_total, raw_pairs, rc = _raw_check_pairs(lib, verts, faces, max_pairs=total)
-    if rc not in (0, 2):
-        return raw_total, (), rc
+    if total > budget:
+        total, raw_pairs, rc = _raw_check_pairs(lib, verts, faces, max_pairs=total)
+        if rc not in (0, 2):
+            return total, (), rc
     filtered = _filter_collider_pairs(raw_pairs, is_collider)
     if max_pairs <= 0:
         return len(filtered), (), rc
     return len(filtered), filtered[:max_pairs], rc
 
 
-def _body_bvh_world(body: bpy.types.Object) -> BVHTree | None:
-    """World-space triangle BVH for the STATIC body copy."""
-    b_verts, b_faces = _mesh_arrays_world(body)
-    if b_faces.shape[0] == 0:
+def _proxy_bvh(proxy: _BodyProxy | None) -> BVHTree | None:
+    """World-space triangle BVH for the cropped STATIC body.
+
+    Built from the proxy rather than the whole body: the tree is only ever
+    queried for the nearest surface to a cloth vertex that is already reported
+    as crossing the body, and the crop keeps a cell of slack around the cloth,
+    so the nearest triangle is in it. On the reference character that is 55k
+    triangles instead of 449k, and this builds them through Python lists.
+    """
+    if proxy is None or proxy.faces.shape[0] == 0:
         return None
-    points = [Vector((float(p[0]), float(p[1]), float(p[2]))) for p in b_verts]
-    tris = [[int(i) for i in f] for f in b_faces]
+    points = [Vector((float(p[0]), float(p[1]), float(p[2]))) for p in proxy.verts]
+    tris = [[int(i) for i in f] for f in proxy.faces]
     return BVHTree.FromPolygons(points, tris, all_triangles=True)
 
 
@@ -514,7 +664,7 @@ def _separate_cloth_cloth_verts(
 def _local_fix_cloth_against_body(
     lib,
     cloth: bpy.types.Object,
-    body: bpy.types.Object,
+    proxy: _BodyProxy | None,
     cloth_verts: np.ndarray,
     cloth_faces: np.ndarray,
     n_cloth_faces: int,
@@ -529,7 +679,7 @@ def _local_fix_cloth_against_body(
 
     Returns (fix_status, message). Writes cloth when geometry changes.
     """
-    body_bvh = _body_bvh_world(body)
+    body_bvh = _proxy_bvh(proxy)
     if body_bvh is None:
         return "NOOP", "no body triangles"
 
@@ -578,19 +728,11 @@ def _local_fix_cloth_against_body(
         if moved_body == 0 and moved_sep == 0:
             break
 
-        # Guidance probe only (not the host CHECK 2 gate).
-        b_verts, b_faces = _mesh_arrays_world(body)
-        n_cloth_verts = int(trial.shape[0])
-        comb_verts = np.ascontiguousarray(np.vstack([trial, b_verts]), dtype=np.float64)
-        shifted = b_faces + np.int32(n_cloth_verts)
-        comb_faces = np.ascontiguousarray(
-            np.vstack([cloth_faces, shifted]), dtype=np.int32
-        )
-        is_collider = np.concatenate(
-            [
-                np.zeros((n_cloth_faces,), dtype=np.uint8),
-                np.ones((b_faces.shape[0],), dtype=np.uint8),
-            ]
+        # Guidance probe only (not the host CHECK 2 gate). The body proxy is
+        # reused rather than rebuilt: it was cropped with a cell of slack and a
+        # pass moves cloth by well under that, so it still covers the cloth.
+        comb_verts, comb_faces, _n, is_collider = _combined_cloth_body_arrays(
+            trial, cloth_faces, proxy
         )
         after_count, after_pairs, rc = _check_pairs(
             lib,
@@ -676,19 +818,15 @@ def _dll_fix_cloth_only(
 
 def _mesh_for_check(
     cloth: bpy.types.Object,
-    body: bpy.types.Object | None,
+    proxy: _BodyProxy | None,
     *,
     use_body: bool,
 ) -> tuple[np.ndarray, np.ndarray, int, np.ndarray | None]:
-    """Build checker arrays from the current Blender mesh(es)."""
+    """Build checker arrays from the current Blender cloth and the body proxy."""
     cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
-    n_cloth_faces = int(cloth_faces.shape[0])
-    if use_body and body is not None:
-        verts, faces, n_cloth_faces, is_collider = _combined_cloth_body_arrays(
-            cloth, body
-        )
-        return verts, faces, n_cloth_faces, is_collider
-    return cloth_verts, cloth_faces, n_cloth_faces, None
+    if use_body and proxy is not None:
+        return _combined_cloth_body_arrays(cloth_verts, cloth_faces, proxy)
+    return cloth_verts, cloth_faces, int(cloth_faces.shape[0]), None
 
 
 def run_check_and_fix(
@@ -731,9 +869,17 @@ def run_check_and_fix(
         )
 
     version = lib.shell_isect_version().decode("utf-8", errors="replace")
+    # Crop the body once, from the cloth as it stands. Every stage below reuses
+    # it: CHECK 1, the fix loop's probes and its BVH, and CHECK 2.
+    proxy = None
+    if use_body:
+        cloth_verts0, cloth_faces0 = _mesh_arrays_world(cloth)
+        proxy = _body_proxy(cloth_verts0, cloth_faces0, body)
     verts, faces, n_cloth_faces, is_collider = _mesh_for_check(
-        cloth, body, use_body=use_body
+        cloth, proxy, use_body=use_body
     )
+    body_tested = proxy.kept if proxy is not None else 0
+    body_total = proxy.total if proxy is not None else 0
 
     if faces.shape[0] < 2:
         return ShellIsectReport(
@@ -753,12 +899,13 @@ def run_check_and_fix(
     # ------------------------------------------------------------------
     # CHECK 1 — detect only (DLL shell_isect_check)
     # ------------------------------------------------------------------
-    # Count first so the pair buffer can be sized exactly when needed.
-    check1_count, _pairs_stub, rc = _check_pairs(
+    # One call: it returns the count and the pairs the FIX stage needs, and
+    # `_check_pairs` asks again only if its buffer actually overflowed.
+    check1_count, check1_pairs, rc = _check_pairs(
         lib,
         verts,
         faces,
-        max_pairs=0,
+        max_pairs=_PAIR_BUDGET,
         is_collider=is_collider,
     )
     if rc not in (0, 2):
@@ -774,6 +921,8 @@ def run_check_and_fix(
             include_body=use_body,
             checks_run=1,
             fix_attempted=False,
+            body_faces_tested=body_tested,
+            body_faces_total=body_total,
         )
 
     if check1_count == 0:
@@ -794,29 +943,8 @@ def run_check_and_fix(
             include_body=use_body,
             checks_run=1,
             fix_attempted=False,
-        )
-
-    # Materialize face pairs for the FIX stage pocket.
-    check1_count, check1_pairs, rc = _check_pairs(
-        lib,
-        verts,
-        faces,
-        max_pairs=max(check1_count, 1),
-        is_collider=is_collider,
-    )
-    if rc not in (0, 2):
-        return ShellIsectReport(
-            available=True,
-            version=version,
-            pairs_before=-1,
-            pairs_after=-1,
-            fix_status="SKIPPED",
-            message=f"check1 pairs failed rc={rc}",
-            pairs=(),
-            n_cloth_faces=n_cloth_faces,
-            include_body=use_body,
-            checks_run=1,
-            fix_attempted=False,
+            body_faces_tested=body_tested,
+            body_faces_total=body_total,
         )
 
     # ------------------------------------------------------------------
@@ -827,7 +955,7 @@ def run_check_and_fix(
         fix_name, fix_message = _local_fix_cloth_against_body(
             lib,
             cloth,
-            body,
+            proxy,
             cloth_verts,
             cloth_faces,
             n_cloth_faces,
@@ -843,7 +971,7 @@ def run_check_and_fix(
     # CHECK 2 — detect only on post-FIX mesh (always after a FIX attempt)
     # ------------------------------------------------------------------
     verts2, faces2, n_cloth_faces2, is_collider2 = _mesh_for_check(
-        cloth, body, use_body=use_body
+        cloth, proxy, use_body=use_body
     )
     check2_count, check2_pairs, rc = _check_pairs(
         lib,
@@ -865,6 +993,8 @@ def run_check_and_fix(
             include_body=use_body,
             checks_run=2,
             fix_attempted=True,
+            body_faces_tested=body_tested,
+            body_faces_total=body_total,
         )
 
     if check2_count == 0:
@@ -887,9 +1017,15 @@ def run_check_and_fix(
         pairs_after=check2_count,
         fix_status=fix_name,
         message=final_message,
-        pairs=check2_pairs[:_MAX_REPORT_PAIRS],
+        # Reported pairs name body triangles by their index in the whole body,
+        # not in the crop, so a face pair still points at something findable.
+        pairs=_restore_body_faces(
+            check2_pairs[:_MAX_REPORT_PAIRS], n_cloth_faces2, proxy
+        ),
         n_cloth_faces=n_cloth_faces2,
         include_body=use_body,
         checks_run=2,
         fix_attempted=True,
+        body_faces_tested=body_tested,
+        body_faces_total=body_total,
     )

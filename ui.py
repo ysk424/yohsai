@@ -559,12 +559,12 @@ class YohsaiProperties(PropertyGroup):
     shell_isect_include_body: BoolProperty(
         name="Shell-isect vs Body",
         description=(
-            "When on, Prepare runs the full cloth+body shell-isect twin (slow on "
-            "high-poly bodies, can take many minutes). When off (default), only "
-            "cloth–cloth pairs are checked so Prepare stays practical. Body copy "
-            "is still built for ZOZO either way"
+            "When on (default), Prepare runs the full cloth+body shell-isect "
+            "twin — the same pairs ZOZO counts. Only the body under the garment "
+            "is tested, so this is seconds rather than the minutes it used to "
+            "take. Turn it off to check cloth against itself alone"
         ),
-        default=False,
+        default=True,
     )
 
 
