@@ -35,6 +35,15 @@ Status: current development state
   weld or clear anything -- Zero GRAVITY has already closed the seams, and
   moving good cloth on the way out could only make it worse. See
   `ZOZO_HANDOFF_DESIGN.md` for the failure the two checks exist for.
+- One lattice pitch, 5 mm, for every panel (`MESH_SPACING_M`). The old rule was
+  10 mm with 5 mm for panels under 5 cm on the short side, justified by a full
+  5 mm mesh breaking the square-lattice solve — that solver went in 0.13.0 and
+  took the justification with it. What replaced it points the other way: under
+  the arm two panels have to slide past each other, and a 10 mm facet stands too
+  high off the surface it approximates for them to pass. `part_spacing_m` still
+  answers with whatever pitch a part was actually cut at, so a garment carried
+  across the change keeps its 10 mm panels until Update re-cuts it, and Prepare
+  for ZOZO stops rather than hand over a half-converted garment.
 - Yohsai had a cloth solver of its own until 0.13.0: a native square-lattice
   runtime behind a Normal GRAVITY button, with a CUDA path, an OpenMP colouring
   and an undoable session. It is gone, along with `native/`, `native_solver.py`

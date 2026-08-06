@@ -27,7 +27,13 @@ import bpy
 import numpy as np
 
 from .kitsuke import KitsukeError, _seam_constraints_from_parts, part_ranges
-from .mesh_loader import MESH_SPACING_M, UpdateError, remesh_with_seam_counts
+from .mesh_loader import (
+    MESH_SPACING_M,
+    UpdateError,
+    participating_parts,
+    part_spacing_m,
+    remesh_with_seam_counts,
+)
 from .shell_isect_bridge import ShellIsectReport, run_check_and_fix
 
 
@@ -47,14 +53,20 @@ _HANDOFF_BODY_ROLE = "zozo_body"
 # p^T A p is not-a-number at iter 0`, having written no frames and no cause a
 # Yohsai user could read.
 #
-# The gap this sits in was measured, not chosen. A panel this file builds
-# cleanly bottoms out at 2.8e-8 m² -- 2.8e-4 of a cell -- and the triangle that
-# broke the solve sat at 3.6e-8 of a cell, four decades below it. ZOZO's own
-# bending term gives up lower still, zeroing the stiffness under 1e-12 m²
-# absolute (`energy.cu`), which at this pitch is 1e-8 of a cell. A floor of
-# 1e-6 of a cell is a hundred times above the point where ZOZO stops trusting
-# the element and a hundred times below the worst a good panel produces, so
-# nothing has to be judged in between.
+# The gap this sits in was measured, not chosen. A panel the builder cuts
+# cleanly bottoms out at 2.8e-4 of a cell (2.8e-8 m² on the 10 mm lattice it was
+# measured on; the fraction is what carries over, since a triangle's area and a
+# cell's area both scale with the pitch squared), and the triangle that broke
+# the solve sat at 3.6e-8 of a cell, four decades below it. A floor of 1e-6 of a
+# cell is therefore 280 times below the worst a good panel produces, at any
+# pitch.
+#
+# Below the floor is ZOZO's own giving-up point, and that one is absolute rather
+# than relative: `energy.cu` zeroes a bending stiffness under 1e-12 m² whatever
+# the cell is. The margin above it is the one thing here that moves with the
+# pitch -- 100x at 10 mm, 25x at the 5 mm this build cuts. Still a margin, and
+# still nothing in between that has to be judged, but it is the number to watch
+# if the pitch ever halves again.
 _REST_AREA_FLOOR_FRACTION = 1.0e-6
 # How many bad triangles to name in the status line before summarising.
 _MAX_REPORT_FACES = 8
@@ -448,7 +460,7 @@ def _cloth_quality(
     if attribute is not None and len(attribute.data) == vertex_count:
         attribute.data.foreach_get("value", part_of_vertex)
     spacings = np.asarray(
-        [float(part.get("yohsai_mesh_spacing_m", MESH_SPACING_M)) for part in parts],
+        [part_spacing_m(part) for part in parts],
         dtype=np.float64,
     )
     if not len(spacings):
@@ -490,6 +502,32 @@ def _cloth_quality(
     )
 
 
+def _stale_pitch_parts(
+    collection: bpy.types.Collection,
+) -> tuple[tuple[str, float], ...]:
+    """Parts cut on a lattice pitch this build no longer cuts.
+
+    A `.blend` outlives the code that filled it, and the pitch is the one thing
+    about a panel that the hand-off cannot quietly correct. Re-cutting is how it
+    would be corrected, and re-cutting after the garment is sewn resamples the
+    drape onto a topology the solver never saw -- which is the whole reason the
+    pitch was changed at the source rather than here.
+
+    Left alone, the two silent outcomes are both bad and neither says anything:
+    a garment whose seam counts already agree is handed over at its old pitch,
+    unchanged and unmentioned; a garment with one mismatched seam has that one
+    panel re-cut fine and the rest left coarse, and goes over half converted.
+    Naming it is cheap, and Update followed by GRAVITY is a repair the operator
+    can actually carry out.
+    """
+    stale: list[tuple[str, float]] = []
+    for obj in participating_parts(collection):
+        spacing = part_spacing_m(obj)
+        if abs(spacing - MESH_SPACING_M) > 1.0e-9:
+            stale.append((obj.name, spacing))
+    return tuple(stale)
+
+
 def _project_name(collection_name: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_-]+", "_", collection_name).strip("_")
     return f"yohsai_{value or 'clothes'}"
@@ -520,6 +558,23 @@ def prepare_for_zozo(
     if body is None or body.type != "MESH":
         raise ZozoHandoffError("Select a mesh Body before Prepare for ZOZO.")
     context.view_layer.update()
+
+    # Pitch before topology: the re-cut below would convert some panels to the
+    # current pitch and leave the rest, and neither half of that is worth
+    # handing over.
+    stale = _stale_pitch_parts(collection)
+    if stale:
+        shown = ", ".join(
+            f"{name} ({spacing * 1000.0:.0f} mm)" for name, spacing in stale[:4]
+        )
+        if len(stale) > 4:
+            shown += f", ... (+{len(stale) - 4} more)"
+        raise ZozoHandoffError(
+            f"{len(stale)} panel(s) were cut on a lattice this build no longer "
+            f"cuts and would go over at the wrong pitch: {shown}, against "
+            f"{MESH_SPACING_M * 1000.0:.0f} mm. Press Update to re-cut the "
+            "pattern, then run GRAVITY again before handing over"
+        )
 
     # Re-cut first, so what goes over is a panel this file built rather than
     # whichever one has been sitting in the scene. A garment carried across

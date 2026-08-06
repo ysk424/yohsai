@@ -22,12 +22,26 @@ RING_OPENING_M = 0.03
 # A RING seam closes one part onto itself, so its label carries the part it
 # belongs to and never matches a group authored in the pattern.
 RING_LABEL_PREFIX = "RING_"
-MESH_SPACING_M = 0.01
-# Small panels keep a finer interior lattice so short pieces still read as cloth.
-# Large panels stay on the 10 mm lattice so tension can propagate without a full
-# 5 mm global mesh (which tends to break the square-lattice solve).
-FINE_MESH_SPACING_M = 0.005
-FINE_MESH_MAX_SHORT_SIDE_M = 0.05  # 5 cm; constant knob, not a derived law
+# The lattice pitch, and there is only one of it.
+#
+# It was 10 mm, with 5 mm kept for panels whose shorter pattern-page side fell
+# under 5 cm so small pieces still read as cloth. The reason given for holding
+# the large panels at 10 mm was that a full 5 mm mesh "tends to break the
+# square-lattice solve" -- and that solver was Yohsai's own, gone since 0.13.0
+# along with `native/` and `SOLVER_DESIGN.md`. Sewing is the contact solver's
+# job now. The reason left with the solver it was about.
+#
+# What is left is a reason pointing the other way, and it is under the arm.
+# Two panels have to slide past each other there, and at 10 mm they do not:
+# a facet that coarse stands too far off the surface it approximates, so the
+# two sheets catch on each other's ridges instead of passing. That standoff is
+# the chord's sagitta and it falls with the square of the pitch, so halving the
+# pitch quarters the ridge, and the cloth gets through.
+#
+# One pitch for every panel also means every seam is a same-pitch seam, which
+# is the only case `compute_seam_count_overrides` has to reason about for a
+# garment cut by this build.
+MESH_SPACING_M = 0.005
 # One-layer sewing-edge paving band (see SEAM_BOUNDARY_LAYER_DESIGN.md).
 SEAM_BAND_WIDTH_M = 0.01  # 10 mm
 VERTEX_KIND_NORMAL = 0
@@ -210,43 +224,15 @@ def _point(value: object, field: str) -> Vector:
     return result
 
 
-def _panel_pattern_bounds(panel: dict[str, Any]) -> tuple[float, float, float, float]:
-    """Return axis-aligned pattern-page bounds of a panel's authored segments."""
-    xs: list[float] = []
-    ys: list[float] = []
-    segments = panel.get("segments")
-    if not isinstance(segments, list):
-        return 0.0, 0.0, 0.0, 0.0
-    for segment in segments:
-        if not isinstance(segment, dict):
-            continue
-        for key in ("start", "end", "control1", "control2"):
-            value = segment.get(key)
-            if not isinstance(value, list) or len(value) != 2:
-                continue
-            try:
-                x = float(value[0])
-                y = float(value[1])
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(x) and math.isfinite(y):
-                xs.append(x)
-                ys.append(y)
-    if not xs or not ys:
-        return 0.0, 0.0, 0.0, 0.0
-    return min(xs), max(xs), min(ys), max(ys)
+def part_spacing_m(obj: bpy.types.Object) -> float:
+    """The pitch a part was actually cut at, which need not be this build's.
 
-
-def _panel_spacing_m(panel: dict[str, Any]) -> float:
-    """Choose 5 mm for small panels, otherwise the default 10 mm lattice."""
-    min_x, max_x, min_y, max_y = _panel_pattern_bounds(panel)
-    short_side = min(max_x - min_x, max_y - min_y)
-    if short_side <= FINE_MESH_MAX_SHORT_SIDE_M:
-        return FINE_MESH_SPACING_M
-    return MESH_SPACING_M
-
-
-def _object_spacing_m(obj: bpy.types.Object) -> float:
+    Every path that writes a panel mesh records `yohsai_mesh_spacing_m`, so a
+    part cut by an older build still answers 10 mm here long after
+    `MESH_SPACING_M` became 5 mm. That is the point: a garment carried across a
+    version keeps its own pitch until it is re-cut, and the seam-count pass and
+    the ZOZO quality floor both have to judge it on the pitch it has.
+    """
     try:
         spacing = float(obj.get("yohsai_mesh_spacing_m", MESH_SPACING_M))
     except (TypeError, ValueError):
@@ -663,10 +649,18 @@ def _pattern_tolerance(spacing: float) -> float:
     that one triangle contributes terms around 1e11 and takes the first solve to
     NaN: the solver stops after frame 0 having written nothing.
 
-    Tying the tolerance to the lattice pitch instead keeps it meaningful at any
-    page scale: 1 um at a 10 mm pitch is ten times the float32 step and ten
+    Tying the tolerance to the lattice pitch keeps it meaningful at any page
+    scale, and the 1 um floor is what keeps it above the float32 step when the
+    pitch is small. At the 5 mm pitch the floor is the live term -- a ten
+    thousandth of the pitch would be 500 nm, inside the float32 step where two
+    copies of a point cannot be told apart. 1 um is ten times that step and five
     thousand times finer than the mesh, so it can only ever merge points that
-    were never distinct. `_grid_coordinate` already rounds on the same rule.
+    were never distinct.
+
+    `_grid_coordinate` rounds on the pitch-relative term alone, without this
+    floor: 500 nm at 5 mm, four float32 steps rather than eight. It still tells
+    a lattice point from noise, and a point it fails to recognise costs a
+    grainline quad, not a solve.
     """
     return max(spacing * 1.0e-4, 1.0e-6)
 
@@ -686,8 +680,24 @@ def _lattice_minimum(spacing: float) -> float:
     and the interior lattice are all this file's own construction, and a second
     point within a twentieth of the pitch adds nothing a solver can use. The
     fraction is set from what a clean lattice actually achieves: `ppf_remesh`
-    reaches a 474 um shortest edge at this pitch, so 500 um is the target to
-    match rather than a number chosen to make a measurement pass.
+    reached a 474 um shortest edge on the 10 mm lattice this was measured on, so
+    500 um was the target to match rather than a number chosen to make a
+    measurement pass.
+
+    This bounds only what passes through `_VertexMerger`. `delaunay_2d_cdt`
+    makes vertices of its own where two constraint edges cross, after the merger
+    has run, and those answer to `_pattern_tolerance` (1 um) instead. At 5 mm
+    there are twice as many constraints -- band spokes, P rows, fold segments --
+    so there are more crossings, and it shows: on the reference pattern the
+    shortest edge is 22 um at 5 mm against 121 um at 10 mm, and 34 edges fall
+    under a twentieth of the pitch where 10 mm had 2.
+
+    Shorter, but not thinner, and thinness is what the solvers mind. The same
+    cut's worst aspect improves from 3.3e-4 to 1.1e-3, its smallest rest area
+    clears the ZOZO floor by 88x, and nothing is degenerate. Raising the CDT's
+    tolerance to this fraction would fix the count and is the wrong trade: it
+    also decides when two authored boundary points are the same point, and
+    welding two of those collapses a seam pair the count matching depends on.
     """
     return spacing * 0.05
 
@@ -1212,8 +1222,8 @@ def _panel_geometries(
     seam_counts_by_panel: dict[str, dict[str, int]] | None = None,
 ) -> list[PanelGeometry]:
     result: list[PanelGeometry] = []
+    spacing = MESH_SPACING_M
     for panel in panels:
-        spacing = _panel_spacing_m(panel)
         seam_counts = (seam_counts_by_panel or {}).get(str(panel.get("id", "")))
         if bool(panel.get("mirror", False)):
             result.append(_triangulate_panel(panel, spacing, "LEFT", seam_counts))
@@ -2223,9 +2233,9 @@ def compute_seam_count_overrides(
         if closed_objs:
             # Ring-composite armhole: closed sleeve ring <-> composite body loop.
             # Prefer the coarser closed path when a fine mesh is mixed in.
-            closed_spacings = {_object_spacing_m(obj) for obj in closed_objs}
+            closed_spacings = {part_spacing_m(obj) for obj in closed_objs}
             if max(closed_spacings) - min(closed_spacings) > 1.0e-12:
-                coarse = max(closed_objs, key=_object_spacing_m)
+                coarse = max(closed_objs, key=part_spacing_m)
                 target = _rep_verts(closed_objs[coarse])
             else:
                 target = max(_rep_verts(chains) for chains in closed_objs.values())
@@ -2258,12 +2268,12 @@ def compute_seam_count_overrides(
             if len(open_objs) != 2:
                 continue
             verts = {obj: _rep_verts(chains) for obj, chains in open_objs.items()}
-            spacings = {obj: _object_spacing_m(obj) for obj in open_objs}
+            spacings = {obj: part_spacing_m(obj) for obj in open_objs}
             spacing_values = list(spacings.values())
             if abs(spacing_values[0] - spacing_values[1]) > 1.0e-12:
                 # Mixed resolution: keep the coarser side; sparsify/densify the
                 # other so both boundaries share that count (1-skip equivalent).
-                coarse = max(open_objs, key=_object_spacing_m)
+                coarse = max(open_objs, key=part_spacing_m)
                 target = verts[coarse]
             else:
                 # Same pitch: longer side wins so gather still bunches fabric.

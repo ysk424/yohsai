@@ -113,6 +113,18 @@ A hundred times above the point where ZOZO itself stops trusting the element,
 a hundred times below the worst a good panel produces. Nothing has to be
 judged in the space between.
 
+That table was measured at 10 mm, which is no longer the pitch the builder
+cuts. Two of its three columns survive the move to 5 mm and one does not. The
+floor and a clean panel's worst triangle are both fractions of a cell, and a
+triangle's area and a cell's area both scale with the pitch squared, so the
+280x between them holds at any pitch — measured on the reference pattern after
+the change, the smallest rest area clears the floor by 88x, which is the same
+statement about a garment rather than about one panel. ZOZO's own giving-up
+point is the exception: `energy.cu` zeroes a bending stiffness under 1e-12 m²
+whatever the cell is, so the margin above it shrinks with the cell — 100x at
+10 mm, 25x at 5 mm. Still clear, still nothing to judge in between, and the
+number to look at first if the pitch ever halves again.
+
 Run against the garment that failed, the gate names two faces out of 21,956 —
 3.555e-12 m² and 7.728e-12 m², the two that were there — and passes the rest.
 
