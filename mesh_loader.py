@@ -652,11 +652,125 @@ def _grainline_topology(
     return edge_family, quads, face_quads
 
 
-def _find_vertex(points: list[Vector], target: Vector, tolerance: float = 1.0e-8) -> int:
+def _pattern_tolerance(spacing: float) -> float:
+    """How close two authored pattern points have to be to be the same point.
+
+    Pattern coordinates run to about 1.5 m across the page and `mathutils.Vector`
+    stores them as float32, whose step up there is 60-120 nm. A tolerance below
+    that cannot recognise a point as itself, so one authored point becomes two
+    vertices a tenth of a micron apart -- and the triangle between them has a
+    rest area of 4e-12 m². A shell element's Hessian scales with 1/rest area, so
+    that one triangle contributes terms around 1e11 and takes the first solve to
+    NaN: the solver stops after frame 0 having written nothing.
+
+    Tying the tolerance to the lattice pitch instead keeps it meaningful at any
+    page scale: 1 um at a 10 mm pitch is ten times the float32 step and ten
+    thousand times finer than the mesh, so it can only ever merge points that
+    were never distinct. `_grid_coordinate` already rounds on the same rule.
+    """
+    return max(spacing * 1.0e-4, 1.0e-6)
+
+
+def _lattice_minimum(spacing: float) -> float:
+    """How close a generated point may come to one that is already there.
+
+    Removing the exact duplicates leaves the near ones, and they are the same
+    problem one order up: measured on the reference panel, the seam band's inner
+    row passed 63 um from a fold vertex and 121 um from a lattice vertex, on a
+    10 mm pitch. The triangles between them are not degenerate but they are
+    slivers, and the strain limiter gives up on those the way the Hessian gives
+    up on needles -- it reports `SL_toi: 0` and the solve stops advancing.
+
+    Only points Yohsai generates are subject to this. The outline is authored,
+    carries the seams, and is never moved or merged; the seam band, the fold row
+    and the interior lattice are all this file's own construction, and a second
+    point within a twentieth of the pitch adds nothing a solver can use. The
+    fraction is set from what a clean lattice actually achieves: `ppf_remesh`
+    reaches a 474 um shortest edge at this pitch, so 500 um is the target to
+    match rather than a number chosen to make a measurement pass.
+    """
+    return spacing * 0.05
+
+
+def _nearest_vertex(points: list[Vector], target: Vector, tolerance: float) -> int:
+    """Index of the closest point within ``tolerance``, or -1.
+
+    Closest rather than first: at these tolerances two candidates mean the mesh
+    already has a duplicate, and picking the nearer one cannot make it worse.
+    """
+    best_index = -1
+    best_distance = tolerance
     for index, point in enumerate(points):
-        if _distance(point, target) <= tolerance:
-            return index
-    raise MeshLoadError("A fold endpoint was not found on the expanded boundary.")
+        distance = _distance(point, target)
+        if distance <= best_distance:
+            best_index = index
+            best_distance = distance
+    return best_index
+
+
+def _find_vertex(points: list[Vector], target: Vector, tolerance: float) -> int:
+    index = _nearest_vertex(points, target, tolerance)
+    if index < 0:
+        raise MeshLoadError("A fold endpoint was not found on the expanded boundary.")
+    return index
+
+
+class _VertexMerger:
+    """Collect a panel's pattern vertices, reusing one that is already there.
+
+    Every stage of the panel build produces points on its own and none of them
+    look at what the others made: the outline is sampled from the authored
+    segments, the seam band is offset inward from it, the fold line is sampled
+    along its own axis, and the interior lattice is stamped on page multiples of
+    the pitch. Two stages landing on the same place is not unusual -- measured on
+    the reference pattern, a lattice point and a seam-band point coincided
+    exactly on each fold panel -- and the triangle spanning the two copies has
+    zero rest area. A shell element's Hessian scales with 1/rest area, so that
+    single triangle is enough to take the first solve to NaN.
+
+    Merging on the way in costs one bucket lookup and removes the whole class.
+    Buckets are a tolerance wide, so the nine around a point cover everything
+    within the tolerance and the pass stays linear in the vertex count.
+    """
+
+    def __init__(self, points: list[Vector], roles: list[int], tolerance: float) -> None:
+        self.points = points
+        self.roles = roles
+        self.tolerance = tolerance
+        self.buckets: dict[tuple[int, int], list[int]] = {}
+        for index, point in enumerate(points):
+            self.buckets.setdefault(self._cell(point), []).append(index)
+        self.merged = 0
+
+    def _cell(self, point: Vector) -> tuple[int, int]:
+        return (
+            int(math.floor(point.x / self.tolerance)),
+            int(math.floor(point.y / self.tolerance)),
+        )
+
+    def find(self, point: Vector) -> int:
+        cell_x, cell_y = self._cell(point)
+        best_index = -1
+        best_distance = self.tolerance
+        for offset_x in (-1, 0, 1):
+            for offset_y in (-1, 0, 1):
+                for index in self.buckets.get((cell_x + offset_x, cell_y + offset_y), ()):
+                    distance = _distance(self.points[index], point)
+                    if distance <= best_distance:
+                        best_index = index
+                        best_distance = distance
+        return best_index
+
+    def add(self, point: Vector, role: int) -> int:
+        existing = self.find(point)
+        if existing >= 0:
+            self.merged += 1
+            return existing
+        index = len(self.points)
+        self.points.append(point.copy())
+        self.roles.append(role)
+        self.buckets.setdefault(self._cell(point), []).append(index)
+        return index
 
 
 def _marked_edge_chains(
@@ -858,6 +972,9 @@ def _triangulate_panel(
     # Input edge index -> shortenable (outer sewing row only).
     input_shortenable = list(sewing_edge_flags)
 
+    tolerance = _pattern_tolerance(spacing)
+    merger = _VertexMerger(input_vertices, input_vertex_role, _lattice_minimum(spacing))
+
     # One-layer paving: proximity companions for sewing-related outline verts.
     prox_of_outline: dict[int, int] = {}
     if has_sewing and SEAM_BAND_WIDTH_M > 0.0:
@@ -868,9 +985,12 @@ def _triangulate_panel(
             offset = _offset_inside(outline, index, normals[index], SEAM_BAND_WIDTH_M)
             if offset is None:
                 continue
-            prox_of_outline[index] = len(input_vertices)
-            input_vertices.append(offset)
-            input_vertex_role.append(VERTEX_KIND_PROXIMITY)
+            prox_index = merger.add(offset, VERTEX_KIND_PROXIMITY)
+            # A companion that merged onto its own outline vertex, or onto one
+            # already claimed, would only give the band a spoke of no length.
+            if prox_index == index or prox_index in prox_of_outline.values():
+                continue
+            prox_of_outline[index] = prox_index
         for index in range(outline_count):
             prox_index = prox_of_outline.get(index)
             if prox_index is None:
@@ -893,13 +1013,18 @@ def _triangulate_panel(
             input_shortenable.append(False)
 
     if fold_points:
-        fold_indices = [_find_vertex(input_vertices, fold_points[0])]
+        # The fold line runs through the panel, so its interior points can land
+        # on a vertex the boundary or the seam band already put there. Appending
+        # them regardless is what produced the sub-micron needles: the same
+        # authored point twice, a float32 step apart. Reuse instead.
+        fold_indices = [_find_vertex(input_vertices, fold_points[0], tolerance)]
         for point in fold_points[1:-1]:
-            fold_indices.append(len(input_vertices))
-            input_vertices.append(point.copy())
-            input_vertex_role.append(VERTEX_KIND_NORMAL)
-        fold_indices.append(_find_vertex(input_vertices, fold_points[-1]))
+            fold_indices.append(merger.add(point, VERTEX_KIND_NORMAL))
+        fold_indices.append(_find_vertex(input_vertices, fold_points[-1], tolerance))
         for start, end in zip(fold_indices, fold_indices[1:]):
+            # Two fold points that resolved to one vertex leave nothing to draw.
+            if start == end:
+                continue
             input_edges.append((start, end))
             input_meta.append(EdgeMeta(None, True, False))
             input_shortenable.append(False)
@@ -916,8 +1041,7 @@ def _triangulate_panel(
         exclude_distance=SEAM_BAND_WIDTH_M if sewing_segments else 0.0,
     )
     for point in grid_points:
-        input_vertices.append(point)
-        input_vertex_role.append(VERTEX_KIND_NORMAL)
+        merger.add(point, VERTEX_KIND_NORMAL)
 
     try:
         output = delaunay_2d_cdt(
@@ -925,7 +1049,11 @@ def _triangulate_panel(
             input_edges,
             [list(range(outline_count))],
             1,
-            1.0e-9,
+            # The CDT's own merge epsilon. It was 1e-9, which is below the
+            # float32 step these coordinates are stored at, so it could not
+            # recognise two copies of a point as one either -- the same mistake
+            # as the tolerances above, in the library rather than in this file.
+            tolerance,
             True,
         )
     except Exception as exc:
