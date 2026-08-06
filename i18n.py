@@ -23,7 +23,7 @@ translations_dict = {
         ("*", "Load"): "読み込み",
         ("Operator", "Zero GRAVITY"): "無重力着付",
         ("*", "Zero GRAVITY"): "無重力着付",
-        ("Operator", "Prepare for ZOZO"): "ZOZO用に書き出す",
-        ("*", "Prepare for ZOZO"): "ZOZO用に書き出す",
+        ("Operator", "Prepare for ZOZO"): "ZOZO用準備作業",
+        ("*", "Prepare for ZOZO"): "ZOZO用準備作業",
     }
 }

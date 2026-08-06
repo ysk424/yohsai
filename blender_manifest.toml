@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.14.0-ppf"
+version = "0.14.1-ppf"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -40,6 +40,7 @@ paths = [
     "SVG_TO_JSON_SPEC.md",
     "KITSUKE_DESIGN.md",
     "PPF_ZERO_GRAVITY_DESIGN.md",
+    "ZOZO_HANDOFF_DESIGN.md",
     "GRAINLINE_DESIGN.md",
     "SEAM_BOUNDARY_LAYER_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",

@@ -26,11 +26,15 @@ Status: current development state
   unlock PENDING; turning it off unlocks non-placed parts. Select Lock is a
   button that toggles Lock on the selection. Both may be off; both must not be
   on. A completed press never changes Lock by itself.
-- Prepare for ZOZO hands the garment over as it stands: copies of the current
-  panels, their seams as stitch edges, their pattern coordinates as UVs, and a
-  copy of the Body, then MCP configuration. It does not sew, open, weld or
-  clear anything -- Zero GRAVITY has already closed the seams, and moving good
-  cloth on the way out could only make it worse.
+- Prepare for ZOZO (`ZOZO用準備作業`) re-cuts, copies, and checks, in that
+  order: `remesh_with_seam_counts` first so what goes over is a panel the
+  current triangulation built rather than whichever one was in the scene, then
+  copies of those panels, their seams as stitch edges, their pattern
+  coordinates as UVs, and a copy of the Body, then shell-isect, then a
+  triangle-quality gate, then MCP configuration. It still does not sew, open,
+  weld or clear anything -- Zero GRAVITY has already closed the seams, and
+  moving good cloth on the way out could only make it worse. See
+  `ZOZO_HANDOFF_DESIGN.md` for the failure the two checks exist for.
 - Yohsai had a cloth solver of its own until 0.13.0: a native square-lattice
   runtime behind a Normal GRAVITY button, with a CUDA path, an OpenMP colouring
   and an undoable session. It is gone, along with `native/`, `native_solver.py`

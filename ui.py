@@ -753,10 +753,12 @@ class YOHSAI_OT_prepare_zozo(Operator):
     bl_idname = "yohsai.prepare_zozo"
     bl_label = "Prepare for ZOZO"
     bl_description = (
-        "Copy the garment as it stands into ZOZO cloth/body objects, run "
-        "shell-isect check→fix→check (cloth-only by default; enable Shell-isect "
-        "vs Body for full twin); on PASS start ZOZO MCP if needed and configure "
-        f"on port {ZOZO_MCP_PORT}. On NG, stop and report"
+        "Re-cut any panel whose seam counts or topology are out of date, copy "
+        "the garment as it stands into ZOZO cloth/body objects, run shell-isect "
+        "check→fix→check (cloth-only by default; enable Shell-isect vs Body for "
+        "full twin), then check every triangle has rest area the solver can "
+        "integrate; on PASS start ZOZO MCP if needed and configure on port "
+        f"{ZOZO_MCP_PORT}. On NG, stop and report before the solver runs"
     )
     bl_options = {"REGISTER"}
 
@@ -799,11 +801,20 @@ class YOHSAI_OT_prepare_zozo(Operator):
             props.parse_status = f"Prepare for ZOZO stopped: {prepared.abort_message}"
             return {"CANCELLED"}
 
-        # Triangle self-intersection already gated by shell-isect; MCP only.
+        # Self-intersection and triangle quality are both gated above; MCP only.
+        recut = (
+            f"re-cut {len(prepared.remeshed_parts)} panel(s); "
+            if prepared.remeshed_parts
+            else ""
+        )
+        quality_note = (
+            f"; {prepared.quality.summary()}" if prepared.quality is not None else ""
+        )
         summary = (
-            f"Prepared {prepared.seam_count} ZOZO stitches "
+            f"{recut}prepared {prepared.seam_count} ZOZO stitches "
             f"(widest seam still open {prepared.seam_distance_max_m * 1000.0:.2f} mm)"
             + shell_suffix
+            + quality_note
         )
         try:
             mcp_port, mcp_note = _ensure_zozo_mcp_server(ZOZO_MCP_PORT)

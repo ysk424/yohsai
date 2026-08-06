@@ -224,6 +224,15 @@ the solver promises is the mesh Blender has. The measurements above say what
 such a mesh has to clear: worst aspect at the 3e-02 the lattice reaches, not the
 2e-03 the current vertices allow.
 
+**It is now caught at the hand-off rather than by the solver.** A garment
+carrying a triangle this small stopped the ZOZO solve on the first Newton step
+of frame 0, and the message the operator got was about memory and named a
+cause the server had not observed. Prepare for ZOZO re-cuts its panels and
+refuses a mesh whose rest areas cannot be integrated, so that failure is now
+reported in Yohsai before anything is transferred — but the gate sits four
+decades below the aspect ratio above, so it says nothing about it. See
+`ZOZO_HANDOFF_DESIGN.md`.
+
 **The read-back still resamples.** 14 pairs is not 0, and each press hands back
 a copy of the operator's cloth rather than their cloth. The clearing means a
 press no longer trips over what the last one left, so it no longer compounds
