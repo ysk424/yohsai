@@ -1,13 +1,13 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.14.1-ppf"
+version = "0.14.1"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
-maintainer = "Yohsai Developers"
+maintainer = "Yoshihiko Tsukamoto"
 type = "add-on"
 
-blender_version_min = "5.1.0"
+blender_version_min = "5.2.0"
 platforms = ["windows-x64"]
 
 license = ["SPDX:GPL-3.0-or-later"]
