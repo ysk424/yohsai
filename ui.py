@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 
 import bpy
-from bpy.props import BoolProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, FloatProperty, PointerProperty, StringProperty
 from bpy.types import (
     AddonPreferences,
     Collection,
@@ -566,6 +566,36 @@ class YohsaiProperties(PropertyGroup):
         ),
         default=True,
     )
+    # World-Z band of the Body copy handed to ZOZO (cm in the panel, meters
+    # inside prepare_for_zozo). Defaults match a torso-length garment band.
+    body_export_z_min_cm: FloatProperty(
+        name="Bottom (cm)",
+        description=(
+            "Lower world-Z of the exported ZOZO Body mesh, in centimetres "
+            "(default 40 cm = 0.4 m). Triangles fully below this height are dropped"
+        ),
+        default=40.0,
+        min=0.0,
+        max=300.0,
+        soft_min=0.0,
+        soft_max=200.0,
+        step=10,
+        precision=1,
+    )
+    body_export_z_max_cm: FloatProperty(
+        name="Top (cm)",
+        description=(
+            "Upper world-Z of the exported ZOZO Body mesh, in centimetres "
+            "(default 145 cm = 1.45 m). Triangles fully above this height are dropped"
+        ),
+        default=145.0,
+        min=0.0,
+        max=300.0,
+        soft_min=0.0,
+        soft_max=200.0,
+        step=10,
+        precision=1,
+    )
 
 
 class YOHSAI_OT_load_svg(Operator):
@@ -778,6 +808,8 @@ class YOHSAI_OT_prepare_zozo(Operator):
                 props.clothes_collection,
                 props.body_object,
                 shell_isect_include_body=bool(props.shell_isect_include_body),
+                body_z_min_m=float(props.body_export_z_min_cm) * 0.01,
+                body_z_max_m=float(props.body_export_z_max_cm) * 0.01,
             )
         except ZozoHandoffError as exc:
             message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
@@ -883,6 +915,12 @@ class YOHSAI_PT_main(Panel):
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
         actions.operator(YOHSAI_OT_update_svg.bl_idname, text="Update")
         actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
+        # Body export Z band sits directly above Prepare for ZOZO.
+        body_band = actions.box()
+        body_band.label(text="Body export height")
+        band_row = body_band.row(align=True)
+        band_row.prop(props, "body_export_z_min_cm", text="Bottom")
+        band_row.prop(props, "body_export_z_max_cm", text="Top")
         actions.operator(YOHSAI_OT_prepare_zozo.bl_idname, text="Prepare for ZOZO")
         actions.prop(props, "shell_isect_include_body", text="Shell-isect vs Body")
         layout.separator(factor=0.5)

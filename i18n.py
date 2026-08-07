@@ -25,5 +25,11 @@ translations_dict = {
         ("*", "Zero GRAVITY"): "無重力着付",
         ("Operator", "Prepare for ZOZO"): "ZOZO用準備作業",
         ("*", "Prepare for ZOZO"): "ZOZO用準備作業",
+        ("*", "Body export height"): "ボディ書き出し高さ",
+        ("*", "Bottom"): "下",
+        ("*", "Top"): "上",
+        ("*", "Bottom (cm)"): "下 (cm)",
+        ("*", "Top (cm)"): "上 (cm)",
+        ("*", "Shell-isect vs Body"): "ボディとの交差検査",
     }
 }

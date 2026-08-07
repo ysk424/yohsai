@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Bridge to shell-isect (ZOZO-twin check + local-only fix).
 
-Yohsai pins shell-isect **0.10+** (ships **0.11.x** with real local-fix).
+Yohsai pins shell-isect **0.10+** (ships **0.11.1+** with local-fix + unsliver).
 Read shell-isect PROCEDURE.md before changing how this module calls the DLL.
 
 Host pipeline for Prepare for ZOZO (strict stages):
@@ -63,8 +63,16 @@ _MAX_REPORT_PAIRS = 64
 # Matches ZOZO 1 mm contact gap * 1.1, plus a small pad so edge-tri clears.
 _LOCAL_BODY_CLEARANCE_M = 0.0011
 _LOCAL_BODY_PAD_M = 0.0005
-_LOCAL_FIX_MAX_PASSES = 8
+_LOCAL_FIX_MAX_PASSES = 12
 _LOCAL_CLOTH_SEPARATION_M = 0.0008
+# Cloth–body face-pair push (only cloth moves). Vertex-outward alone misses
+# grazing edge–tri pierces where every cloth corner is already outside.
+_LOCAL_CLOTH_BODY_SEP_M = 0.0008
+_LOCAL_CLOTH_BODY_SEP_GROW_M = 0.0004
+# Match shell-isect 0.11.1 absolute floors: never ship knife-edge triangles.
+_LOCAL_MIN_EDGE_M = 5.0e-5
+_LOCAL_MIN_AREA_M2 = 1.0e-10
+_LOCAL_UNSLIVER_ITERS = 4
 # Broad-phase cell for cropping the body. Only speed depends on it; the test is
 # bounding-box against cell either way, so correctness does not.
 _CROP_CELL_M = 0.01
@@ -661,6 +669,202 @@ def _separate_cloth_cloth_verts(
     return trial, len(moved_verts)
 
 
+def _separate_cloth_from_body_pairs(
+    cloth_verts: np.ndarray,
+    pairs: tuple[tuple[int, int], ...],
+    cloth_faces: np.ndarray,
+    n_cloth_faces: int,
+    proxy: _BodyProxy,
+    separation_m: float,
+) -> tuple[np.ndarray, int]:
+    """Push only cloth verts away from intersecting STATIC body faces.
+
+    Needed when every cloth corner is already outside the body surface
+    (BVH side > 0) but an edge still pierces a body triangle — the usual
+    residual after a vertex-only outward push. Body verts never move.
+    """
+    trial = cloth_verts.copy()
+    moved_verts: set[int] = set()
+    body_faces = proxy.faces
+    body_verts = proxy.verts
+    n_body = int(body_faces.shape[0])
+    for i, j in pairs:
+        if i < n_cloth_faces and j < n_cloth_faces:
+            continue
+        if i < n_cloth_faces <= j:
+            ci, bj = i, j - n_cloth_faces
+        elif j < n_cloth_faces <= i:
+            ci, bj = j, i - n_cloth_faces
+        else:
+            continue
+        if not (0 <= ci < n_cloth_faces and 0 <= bj < n_body):
+            continue
+        fa = [int(v) for v in cloth_faces[ci]]
+        fb = [int(v) for v in body_faces[bj]]
+        pa = trial[fa].mean(axis=0)
+        pb = body_verts[fb].mean(axis=0)
+        # Prefer body face normal (outward-ish) so cloth rides off the surface.
+        e1 = body_verts[fb[1]] - body_verts[fb[0]]
+        e2 = body_verts[fb[2]] - body_verts[fb[0]]
+        n = np.cross(e1, e2)
+        ln = float(np.linalg.norm(n))
+        if ln >= 1.0e-12:
+            direction = n / ln
+            # Flip so the push leaves the body (cloth centroid on outward side).
+            if float(np.dot(pa - pb, direction)) < 0.0:
+                direction = -direction
+        else:
+            d = pa - pb
+            length = float(np.linalg.norm(d))
+            if length < 1.0e-12:
+                continue
+            direction = d / length
+        for vi in fa:
+            trial[vi] = trial[vi] + direction * separation_m
+            moved_verts.add(vi)
+    return trial, len(moved_verts)
+
+
+def _face_areas(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    corners = verts[faces]
+    e1 = corners[:, 1] - corners[:, 0]
+    e2 = corners[:, 2] - corners[:, 0]
+    return 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1)
+
+
+def _incident_face_indices(
+    cloth_faces: np.ndarray, region: set[int]
+) -> np.ndarray:
+    if not region:
+        return np.zeros(0, dtype=np.int32)
+    mask = np.zeros(int(cloth_faces.shape[0]), dtype=bool)
+    for fi, tri in enumerate(cloth_faces):
+        if int(tri[0]) in region or int(tri[1]) in region or int(tri[2]) in region:
+            mask[fi] = True
+    return np.flatnonzero(mask).astype(np.int32)
+
+
+def _areas_edges_acceptable(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    face_ids: np.ndarray,
+    baseline_areas: np.ndarray,
+) -> bool:
+    """Reject trials that collapse a previously healthy triangle."""
+    if face_ids.size == 0:
+        return True
+    areas = _face_areas(verts, faces[face_ids])
+    for index, face_index in enumerate(face_ids):
+        base = float(baseline_areas[index])
+        if base < _LOCAL_MIN_AREA_M2:
+            continue
+        if float(areas[index]) < _LOCAL_MIN_AREA_M2:
+            return False
+        tri = faces[int(face_index)]
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            edge = float(np.linalg.norm(verts[int(tri[a])] - verts[int(tri[b])]))
+            if edge < _LOCAL_MIN_EDGE_M:
+                return False
+    return True
+
+
+def _expand_short_edges(
+    cloth_verts: np.ndarray,
+    cloth_faces: np.ndarray,
+    region: set[int],
+    min_edge_m: float = _LOCAL_MIN_EDGE_M,
+) -> tuple[np.ndarray, int]:
+    """Expand short edges inside ``region`` (topology unchanged)."""
+    trial = cloth_verts.copy()
+    moved = 0
+    for _ in range(_LOCAL_UNSLIVER_ITERS):
+        step_moved = 0
+        for tri in cloth_faces:
+            ids = [int(tri[0]), int(tri[1]), int(tri[2])]
+            for e in range(3):
+                ia, ib = ids[e], ids[(e + 1) % 3]
+                ma, mb = ia in region, ib in region
+                if not ma and not mb:
+                    continue
+                a = trial[ia]
+                b = trial[ib]
+                d = b - a
+                length = float(np.linalg.norm(d))
+                if length >= min_edge_m:
+                    continue
+                if length < 1.0e-12:
+                    ic = ids[(e + 2) % 3]
+                    mid = 0.5 * (a + b)
+                    d = trial[ic] - mid
+                    if float(np.linalg.norm(d)) < 1.0e-12:
+                        d = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                d = d / max(float(np.linalg.norm(d)), 1.0e-12)
+                need = 0.5 * (min_edge_m - length)
+                if ma and mb:
+                    trial[ia] = a - d * need
+                    trial[ib] = b + d * need
+                elif ma:
+                    trial[ia] = a - d * (2.0 * need)
+                else:
+                    trial[ib] = b + d * (2.0 * need)
+                step_moved += 1
+                moved += 1
+        if step_moved == 0:
+            break
+    return trial, moved
+
+
+def _degenerate_face_region(
+    cloth_verts: np.ndarray,
+    cloth_faces: np.ndarray,
+    *,
+    min_edge_m: float = _LOCAL_MIN_EDGE_M,
+    min_area_m2: float = _LOCAL_MIN_AREA_M2,
+) -> set[int]:
+    """Vertex set of faces with a knife edge or near-zero area."""
+    region: set[int] = set()
+    if cloth_faces.size == 0:
+        return region
+    areas = _face_areas(cloth_verts, cloth_faces)
+    for fi, tri in enumerate(cloth_faces):
+        ids = [int(tri[0]), int(tri[1]), int(tri[2])]
+        bad = float(areas[fi]) < min_area_m2
+        if not bad:
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                if float(np.linalg.norm(cloth_verts[ids[a]] - cloth_verts[ids[b]])) < min_edge_m:
+                    bad = True
+                    break
+        if bad:
+            region.update(ids)
+    return region
+
+
+def _heal_cloth_degenerates(cloth: bpy.types.Object) -> tuple[int, int]:
+    """Expand short edges / tiny faces on the whole cloth (topology unchanged).
+
+    FIX often clears tri-tri pairs while leaving a knife-edge triangle a few
+    faces away from the NG pocket — enough to fail the ZOZO rest-area gate
+    (floor ~2.5e-11 m²) even when twin-check is green. Returns
+    ``(faces_touched_estimate, verts_moved)``.
+    """
+    cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
+    region = _degenerate_face_region(cloth_verts, cloth_faces)
+    if not region:
+        return 0, 0
+    n_faces = len(region)  # rough; region is verts
+    healed, moved = _expand_short_edges(cloth_verts, cloth_faces, region)
+    if moved <= 0:
+        return 0, 0
+    # Second pass after expansion can reveal new short edges in the pocket.
+    region2 = _degenerate_face_region(healed, cloth_faces)
+    if region2:
+        healed, moved2 = _expand_short_edges(healed, cloth_faces, region2)
+        moved += moved2
+    if moved > 0:
+        _apply_world_verts(cloth, healed)
+    return n_faces, moved
+
+
 def _local_fix_cloth_against_body(
     lib,
     cloth: bpy.types.Object,
@@ -689,6 +893,7 @@ def _local_fix_cloth_against_body(
     current_count = pairs_before
     clearance = _LOCAL_BODY_CLEARANCE_M + _LOCAL_BODY_PAD_M
     applied_any = False
+    last_region: set[int] = set()
 
     for pass_index in range(_LOCAL_FIX_MAX_PASSES):
         if current_count <= 0:
@@ -701,10 +906,38 @@ def _local_fix_cloth_against_body(
         # Widen after the first pass if residuals remain.
         rings = 1 if pass_index > 0 else 0
         region = _grow_vert_ring(ng_verts, adjacency, rings)
+        last_region = set(region)
+        face_ids = _incident_face_indices(cloth_faces, region)
+        baseline = (
+            _face_areas(working, cloth_faces[face_ids])
+            if face_ids.size
+            else np.zeros(0, dtype=np.float64)
+        )
 
         trial, moved_body = _push_verts_outside_body(
             working, region, body_bvh, clearance
         )
+        # Cloth–body residual pairs: pair-directed push (cloth only). Catches
+        # edge–tri pierces that leave every corner outside the body surface.
+        cloth_body = tuple(
+            (a, b)
+            for a, b in current_pairs
+            if (a < n_cloth_faces) != (b < n_cloth_faces)
+        )
+        moved_cb = 0
+        if cloth_body and proxy is not None:
+            sep_m = (
+                _LOCAL_CLOTH_BODY_SEP_M
+                + _LOCAL_CLOTH_BODY_SEP_GROW_M * float(pass_index)
+            )
+            trial, moved_cb = _separate_cloth_from_body_pairs(
+                trial,
+                cloth_body,
+                cloth_faces,
+                n_cloth_faces,
+                proxy,
+                sep_m,
+            )
         # Cloth–cloth residual pairs: gentle mutual separation, then re-clamp.
         cloth_cloth = tuple(
             (a, b)
@@ -720,13 +953,28 @@ def _local_fix_cloth_against_body(
                 n_cloth_faces,
                 _LOCAL_CLOTH_SEPARATION_M,
             )
-            # Separation can push into the body; re-assert clearance on region.
+        # Separation can push into the body; re-assert clearance on region.
+        if moved_cb or moved_sep:
             trial, _ = _push_verts_outside_body(
                 trial, region, body_bvh, clearance
             )
-
-        if moved_body == 0 and moved_sep == 0:
+        trial, moved_unsliver = _expand_short_edges(trial, cloth_faces, region)
+        if (
+            moved_body == 0
+            and moved_sep == 0
+            and moved_cb == 0
+            and moved_unsliver == 0
+        ):
             break
+        if not _areas_edges_acceptable(trial, cloth_faces, face_ids, baseline):
+            # Second chance: only unsliver the working mesh.
+            trial, moved_unsliver = _expand_short_edges(
+                working, cloth_faces, region
+            )
+            if moved_unsliver == 0 or not _areas_edges_acceptable(
+                trial, cloth_faces, face_ids, baseline
+            ):
+                break
 
         # Guidance probe only (not the host CHECK 2 gate). The body proxy is
         # reused rather than rebuilt: it was cropped with a cell of slack and a
@@ -762,10 +1010,36 @@ def _local_fix_cloth_against_body(
         current_count = after_count
         current_pairs = after_pairs
         if after_count == 0:
-            _apply_world_verts(cloth, working)
-            return "CLEARED", "local body push cleared pairs"
+            break
 
         clearance += _LOCAL_BODY_PAD_M
+
+    if applied_any and last_region:
+        # Final unsliver so CLEARED pockets cannot keep a 0.001 mm edge.
+        face_ids = _incident_face_indices(cloth_faces, last_region)
+        baseline = (
+            _face_areas(cloth_verts, cloth_faces[face_ids])
+            if face_ids.size
+            else np.zeros(0, dtype=np.float64)
+        )
+        healed, moved = _expand_short_edges(working, cloth_faces, last_region)
+        if moved and _areas_edges_acceptable(
+            healed, cloth_faces, face_ids, baseline
+        ):
+            comb_verts, comb_faces, _n, is_collider = _combined_cloth_body_arrays(
+                healed, cloth_faces, proxy
+            )
+            healed_count, healed_pairs, rc = _check_pairs(
+                lib,
+                comb_verts,
+                comb_faces,
+                max_pairs=max(int(current_count), _MAX_REPORT_PAIRS),
+                is_collider=is_collider,
+            )
+            if rc in (0, 2) and healed_count <= current_count:
+                working = healed
+                current_count = healed_count
+                current_pairs = healed_pairs
 
     if applied_any:
         _apply_world_verts(cloth, working)
@@ -925,19 +1199,132 @@ def run_check_and_fix(
             body_faces_total=body_total,
         )
 
+    # ------------------------------------------------------------------
+    # FIX — geometry only (DLL fix and/or host local push)
+    # ------------------------------------------------------------------
+    # check1==0 still runs the empty-fix path below so post-fix unsliver
+    # can heal knife edges before the host quality gate.
+    cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
+    fix_name = "SKIPPED"
+    fix_message = "check1 clean; fix skipped"
+    fix_attempted = check1_count > 0
+
     if check1_count == 0:
-        clean_msg = (
+        fix_name = "SKIPPED"
+        fix_message = (
             "check1 clean; fix skipped"
             if use_body
             else "check1 clean; fix skipped (cloth-only; body twin skipped)"
         )
+    elif use_body:
+        # 1) Cloth-only DLL first (cloth–cloth + unsliver). DLL has no STATIC
+        #    mask so it must not run after body-aware push — it can re-pierce.
+        # 2) Body-aware host last so residual cloth–body pairs are the final
+        #    geometry CHECK 2 sees. Cloth–body cannot be fixed by cloth-only
+        #    shell_isect_fix (those pairs are invisible without the body).
+        dll_name, dll_message = _dll_fix_cloth_only(
+            lib, cloth, cloth_verts, cloth_faces
+        )
+        cloth_verts2, cloth_faces2 = _mesh_arrays_world(cloth)
+        # Refresh pair list after DLL so the host targets what remains.
+        verts_mid, faces_mid, _n_mid, is_col_mid = _mesh_for_check(
+            cloth, proxy, use_body=True
+        )
+        mid_count, mid_pairs, mid_rc = _check_pairs(
+            lib,
+            verts_mid,
+            faces_mid,
+            max_pairs=max(check1_count, _PAIR_BUDGET),
+            is_collider=is_col_mid,
+        )
+        if mid_rc not in (0, 2):
+            fix_name = (
+                dll_name if dll_name not in ("NOOP", "SKIPPED") else "FAILED"
+            )
+            fix_message = f"{dll_message}; mid-check failed rc={mid_rc}"
+        elif mid_count <= 0:
+            # All pairs gone after the cloth-only stage (or already clean mid).
+            fix_name = "CLEARED" if check1_count > 0 else "SKIPPED"
+            fix_message = f"{dll_message}; mid-check clean"
+        else:
+            host_name, host_message = _local_fix_cloth_against_body(
+                lib,
+                cloth,
+                proxy,
+                cloth_verts2,
+                cloth_faces2,
+                n_cloth_faces,
+                mid_pairs if mid_pairs else check1_pairs,
+                mid_count,
+            )
+            # Host status is authoritative for residual cloth–body pairs.
+            fix_name = host_name
+            if dll_name in ("APPLIED", "CLEARED"):
+                fix_message = f"{dll_message}; {host_message}"
+            else:
+                fix_message = host_message
+    else:
+        fix_name, fix_message = _dll_fix_cloth_only(
+            lib, cloth, cloth_verts, cloth_faces
+        )
+
+    # ------------------------------------------------------------------
+    # UN-SLIVER — whole-cloth short-edge heal (not only the NG ring)
+    # ------------------------------------------------------------------
+    # Pair-clearing pushes often collapse a neighbouring triangle just outside
+    # the ring. Twin-check stays green; ZOZO's rest-area gate does not.
+    heal_faces, heal_moved = _heal_cloth_degenerates(cloth)
+    if heal_moved > 0:
+        fix_attempted = True
+        if fix_name in ("SKIPPED", "NOOP"):
+            fix_name = "APPLIED"
+        fix_message = (
+            f"{fix_message}; unsliver verts={heal_moved} pocket~{heal_faces}"
+        )
+        # Healing can re-pierce the body: one more body-aware pass if needed.
+        if use_body and proxy is not None:
+            cloth_h, faces_h = _mesh_arrays_world(cloth)
+            vh, fh, nch, ich = _mesh_for_check(cloth, proxy, use_body=True)
+            h_count, h_pairs, h_rc = _check_pairs(
+                lib,
+                vh,
+                fh,
+                max_pairs=max(check1_count, _PAIR_BUDGET),
+                is_collider=ich,
+            )
+            if h_rc in (0, 2) and h_count > 0:
+                host2, host2_msg = _local_fix_cloth_against_body(
+                    lib,
+                    cloth,
+                    proxy,
+                    cloth_h,
+                    faces_h,
+                    nch,
+                    h_pairs if h_pairs else (),
+                    h_count,
+                )
+                fix_name = host2 if host2 != "NOOP" else fix_name
+                fix_message = f"{fix_message}; post-unsliver {host2_msg}"
+                # Re-heal lightly: body push can re-collapse.
+                _, heal_moved2 = _heal_cloth_degenerates(cloth)
+                if heal_moved2 > 0:
+                    fix_message = f"{fix_message}; re-unsliver={heal_moved2}"
+
+    # ------------------------------------------------------------------
+    # CHECK 2 — detect only on post-FIX / post-unsliver mesh
+    # ------------------------------------------------------------------
+    # Always run when we fixed or healed; also when check1 was already clean
+    # but unsliver moved geometry (re-verify). If check1 clean and no heal,
+    # one checker stage is enough.
+    run_check2 = fix_attempted or heal_moved > 0 or check1_count > 0
+    if not run_check2:
         return ShellIsectReport(
             available=True,
             version=version,
             pairs_before=0,
             pairs_after=0,
-            fix_status="SKIPPED",
-            message=clean_msg,
+            fix_status=fix_name,
+            message=fix_message,
             pairs=(),
             n_cloth_faces=n_cloth_faces,
             include_body=use_body,
@@ -947,29 +1334,6 @@ def run_check_and_fix(
             body_faces_total=body_total,
         )
 
-    # ------------------------------------------------------------------
-    # FIX — geometry only (DLL fix and/or host local push)
-    # ------------------------------------------------------------------
-    cloth_verts, cloth_faces = _mesh_arrays_world(cloth)
-    if use_body:
-        fix_name, fix_message = _local_fix_cloth_against_body(
-            lib,
-            cloth,
-            proxy,
-            cloth_verts,
-            cloth_faces,
-            n_cloth_faces,
-            check1_pairs,
-            check1_count,
-        )
-    else:
-        fix_name, fix_message = _dll_fix_cloth_only(
-            lib, cloth, cloth_verts, cloth_faces
-        )
-
-    # ------------------------------------------------------------------
-    # CHECK 2 — detect only on post-FIX mesh (always after a FIX attempt)
-    # ------------------------------------------------------------------
     verts2, faces2, n_cloth_faces2, is_collider2 = _mesh_for_check(
         cloth, proxy, use_body=use_body
     )
@@ -977,7 +1341,7 @@ def run_check_and_fix(
         lib,
         verts2,
         faces2,
-        max_pairs=max(check1_count, _MAX_REPORT_PAIRS),
+        max_pairs=max(check1_count, _MAX_REPORT_PAIRS, 1),
         is_collider=is_collider2,
     )
     if rc not in (0, 2):
@@ -998,11 +1362,16 @@ def run_check_and_fix(
         )
 
     if check2_count == 0:
-        final_message = (
-            "check2 clean after fix"
-            if use_body
-            else "check2 clean after fix (cloth-only; body twin skipped)"
-        )
+        if check1_count == 0 and heal_moved <= 0:
+            final_message = fix_message
+        else:
+            final_message = (
+                "check2 clean after fix"
+                if use_body
+                else "check2 clean after fix (cloth-only; body twin skipped)"
+            )
+            if heal_moved > 0:
+                final_message += f"; {fix_message}"
     else:
         final_message = (
             f"check2 residual pairs; {fix_message}"
@@ -1024,8 +1393,8 @@ def run_check_and_fix(
         ),
         n_cloth_faces=n_cloth_faces2,
         include_body=use_body,
-        checks_run=2,
-        fix_attempted=True,
+        checks_run=2 if (fix_attempted or heal_moved > 0 or check1_count > 0) else 1,
+        fix_attempted=bool(fix_attempted or heal_moved > 0),
         body_faces_tested=body_tested,
         body_faces_total=body_total,
     )

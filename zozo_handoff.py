@@ -404,10 +404,70 @@ def _create_cloth_object(
         raise
 
 
+def _crop_mesh_to_world_z_slab(
+    obj: bpy.types.Object, z_min_m: float, z_max_m: float
+) -> tuple[int, int]:
+    """Keep triangles whose world-Z AABB intersects [z_min_m, z_max_m].
+
+    Drops faces entirely outside the slab and then orphan vertices. Returns
+    ``(faces_kept, faces_before)``. Topology outside the slab is discarded so
+    ZOZO only receives the collider band under the garment.
+    """
+    mesh = obj.data
+    faces_before = len(mesh.polygons)
+    if faces_before == 0:
+        return 0, 0
+    if z_max_m < z_min_m:
+        z_min_m, z_max_m = z_max_m, z_min_m
+
+    # Evaluate world Z without applying the matrix to the mesh data, so parent
+    # armature transforms and the source object's local frame stay intact.
+    matrix = obj.matrix_world
+    world = np.empty((len(mesh.vertices), 3), dtype=np.float64)
+    mesh.vertices.foreach_get("co", world.ravel())
+    rot = np.asarray([tuple(row) for row in matrix.to_3x3()], dtype=np.float64)
+    loc = np.asarray(matrix.to_translation(), dtype=np.float64)
+    world = world @ rot.T + loc
+    z = world[:, 2]
+
+    keep_poly: list[int] = []
+    for poly in mesh.polygons:
+        zs = z[list(poly.vertices)]
+        if float(zs.max()) < z_min_m or float(zs.min()) > z_max_m:
+            continue
+        keep_poly.append(poly.index)
+    if len(keep_poly) == faces_before:
+        return faces_before, faces_before
+    if not keep_poly:
+        # Empty collider is worse than no crop; leave the full mesh and report.
+        return faces_before, faces_before
+
+    import bmesh
+
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        keep_set = set(keep_poly)
+        to_delete = [f for f in bm.faces if f.index not in keep_set]
+        bmesh.ops.delete(bm, geom=to_delete, context="FACES")
+        loose = [v for v in bm.verts if not v.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context="VERTS")
+        bm.to_mesh(mesh)
+        mesh.update()
+    finally:
+        bm.free()
+    return len(mesh.polygons), faces_before
+
+
 def _create_body_object(
     handoff: bpy.types.Collection,
     source: bpy.types.Collection,
     body: bpy.types.Object,
+    *,
+    z_min_m: float | None = None,
+    z_max_m: float | None = None,
 ) -> bpy.types.Object:
     duplicate = body.copy()
     duplicate.data = body.data.copy()
@@ -418,9 +478,21 @@ def _create_body_object(
     if "_solver_uuid" in duplicate:
         del duplicate["_solver_uuid"]
     handoff.objects.link(duplicate)
+    # Ensure world matrix matches the source before Z crop (object.copy keeps
+    # parent; reassert the evaluated world transform so the slab is correct).
+    try:
+        duplicate.matrix_world = body.matrix_world.copy()
+    except Exception:
+        pass
     duplicate["yohsai_role"] = _HANDOFF_BODY_ROLE
     duplicate["yohsai_source_collection"] = source.name
     duplicate["yohsai_source_body"] = body.name
+    if z_min_m is not None and z_max_m is not None:
+        kept, total = _crop_mesh_to_world_z_slab(duplicate, float(z_min_m), float(z_max_m))
+        duplicate["yohsai_body_z_min_m"] = float(min(z_min_m, z_max_m))
+        duplicate["yohsai_body_z_max_m"] = float(max(z_min_m, z_max_m))
+        duplicate["yohsai_body_faces_kept"] = int(kept)
+        duplicate["yohsai_body_faces_total"] = int(total)
     duplicate.display_type = "WIRE"
     duplicate.show_in_front = True
     duplicate.hide_render = True
@@ -539,6 +611,8 @@ def prepare_for_zozo(
     body: bpy.types.Object | None,
     *,
     shell_isect_include_body: bool = False,
+    body_z_min_m: float = 0.4,
+    body_z_max_m: float = 1.45,
 ) -> ZozoPreparation:
     """Create solver-owned cloth/body copies and leave Yohsai untouched.
 
@@ -552,6 +626,9 @@ def prepare_for_zozo(
     ``shell_isect_include_body`` enables the full cloth+body twin check (slow on
     high-poly characters). Default is cloth-only shell-isect for practical time;
     the body copy is still built for ZOZO MCP / Transfer.
+
+    ``body_z_min_m`` / ``body_z_max_m`` limit the exported body copy to the
+    world-Z slab that actually collides with the garment (defaults 0.4–1.45 m).
     """
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise ZozoHandoffError("Select a loaded Yohsai Clothes collection first.")
@@ -612,8 +689,15 @@ def prepare_for_zozo(
 
     # Body copy is required before shell-isect: Transfer checks cloth+STATIC body
     # as one mesh (collider × collider skipped). Twin detection must see body.
+    # Crop to the operator Z band so ZOZO does not carry the full character.
     try:
-        body_copy = _create_body_object(handoff, collection, body)
+        body_copy = _create_body_object(
+            handoff,
+            collection,
+            body,
+            z_min_m=float(body_z_min_m),
+            z_max_m=float(body_z_max_m),
+        )
     except Exception:
         _remove_object_and_owned_mesh(cloth)
         raise
