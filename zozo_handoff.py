@@ -26,6 +26,7 @@ import re
 import bpy
 import numpy as np
 
+from .i18n import msg
 from .kitsuke import KitsukeError, _seam_constraints_from_parts, part_ranges
 from .mesh_loader import (
     MESH_SPACING_M,
@@ -101,32 +102,37 @@ class ClothQualityReport:
         return self.failing_faces == 0
 
     def summary(self) -> str:
-        return (
-            f"triangle quality: {self.checked_faces} faces, smallest rest area "
-            f"{self.area_min_m2:.2e} m² (floor {self.area_floor_m2:.2e}), "
-            f"shortest edge {self.edge_min_m * 1000.0:.3f} mm, "
-            f"worst aspect {self.aspect_min:.2e}, "
-            f"{self.failing_faces} under the floor"
+        return msg(
+            "quality_summary",
+            faces=self.checked_faces,
+            area_min=self.area_min_m2,
+            floor=self.area_floor_m2,
+            edge_mm=self.edge_min_m * 1000.0,
+            aspect=self.aspect_min,
+            failing=self.failing_faces,
         )
 
     def error_report(self) -> str:
-        text = (
-            f"ERROR: {self.failing_faces} triangle(s) have too little rest area "
-            f"for the solver: smallest {self.area_min_m2:.2e} m² against a floor "
-            f"of {self.area_floor_m2:.2e} m². A shell element's stiffness scales "
-            "with 1/area, so these take the first solve to NaN and it stops "
-            "after frame 0"
+        text = msg(
+            "quality_error",
+            failing=self.failing_faces,
+            area_min=self.area_min_m2,
+            floor=self.area_floor_m2,
         )
         if self.worst:
             shown = ", ".join(
-                f"(face {index}: area {area:.2e} m², shortest edge "
-                f"{edge * 1000.0:.4f} mm)"
+                msg(
+                    "quality_worst_item",
+                    index=index,
+                    area=area,
+                    edge_mm=edge * 1000.0,
+                )
                 for index, area, edge in self.worst[:_MAX_REPORT_FACES]
             )
-            text += f". Worst: {shown}"
+            text += msg("quality_worst", shown=shown)
             if self.failing_faces > len(self.worst[:_MAX_REPORT_FACES]):
                 remaining = self.failing_faces - len(self.worst[:_MAX_REPORT_FACES])
-                text += f", ... (+{remaining} more)"
+                text += msg("quality_worst_more", n=remaining)
         return text
 
 
@@ -152,7 +158,7 @@ class ZozoPreparation:
 
     def mcp_configuration(self, scene: bpy.types.Scene) -> dict:
         if self.body_object is None:
-            raise ZozoHandoffError("ZOZO body was not exported; cannot configure MCP.")
+            raise ZozoHandoffError(msg("zozo_no_body_export"))
         frame_start, frame_count, fps = _sync_scene_timeline_for_zozo(scene)
         # Integer steps per display frame: 1/fps/N. Prefer N=8 when it fits the
         # ZOZO step_size range (0.001–0.01); fall back to 0.005.
@@ -267,9 +273,7 @@ def _pattern_positions(obj: bpy.types.Object) -> list[tuple[float, float]]:
         or attribute.data_type != "FLOAT_VECTOR"
         or len(attribute.data) != len(obj.data.vertices)
     ):
-        raise ZozoHandoffError(
-            f"{obj.name} has no valid Yohsai pattern coordinates; load the pattern again."
-        )
+        raise ZozoHandoffError(msg("zozo_pattern_missing", name=obj.name))
     return [(float(item.vector[0]), float(item.vector[1])) for item in attribute.data]
 
 
@@ -363,7 +367,7 @@ def _create_cloth_object(
         mesh.from_pydata(vertices, edges, faces)
         mesh.update(calc_edges=True, calc_edges_loose=True)
         if len(mesh.vertices) != len(vertices) or len(mesh.polygons) != len(faces):
-            raise ZozoHandoffError("The ZOZO hand-off topology changed while creating the mesh.")
+            raise ZozoHandoffError(msg("zozo_topo_changed"))
 
         for material in materials:
             mesh.materials.append(material)
@@ -384,7 +388,7 @@ def _create_cloth_object(
                 stitch_attribute.data[edge.index].value = True
                 found_stitches += 1
         if found_stitches != len(stitch_keys):
-            raise ZozoHandoffError("A loose ZOZO stitch edge was lost while creating the mesh.")
+            raise ZozoHandoffError(msg("zozo_stitch_lost"))
 
         uv_layer = mesh.uv_layers.new(name="Yohsai Pattern", do_init=False)
         for polygon, uvs in zip(mesh.polygons, face_uvs):
@@ -631,9 +635,9 @@ def prepare_for_zozo(
     world-Z slab that actually collides with the garment (defaults 0.4–1.45 m).
     """
     if collection is None or collection.get("yohsai_role") != "clothes":
-        raise ZozoHandoffError("Select a loaded Yohsai Clothes collection first.")
+        raise ZozoHandoffError(msg("zozo_need_clothes"))
     if body is None or body.type != "MESH":
-        raise ZozoHandoffError("Select a mesh Body before Prepare for ZOZO.")
+        raise ZozoHandoffError(msg("zozo_need_body"))
     context.view_layer.update()
 
     # Pitch before topology: the re-cut below would convert some panels to the
@@ -647,10 +651,12 @@ def prepare_for_zozo(
         if len(stale) > 4:
             shown += f", ... (+{len(stale) - 4} more)"
         raise ZozoHandoffError(
-            f"{len(stale)} panel(s) were cut on a lattice this build no longer "
-            f"cuts and would go over at the wrong pitch: {shown}, against "
-            f"{MESH_SPACING_M * 1000.0:.0f} mm. Press Update to re-cut the "
-            "pattern, then run GRAVITY again before handing over"
+            msg(
+                "zozo_stale_pitch",
+                n=len(stale),
+                shown=shown,
+                mm=MESH_SPACING_M * 1000.0,
+            )
         )
 
     # Re-cut first, so what goes over is a panel this file built rather than
@@ -673,14 +679,14 @@ def prepare_for_zozo(
     except KitsukeError as exc:
         raise ZozoHandoffError(str(exc)) from exc
     if seams.size == 0:
-        raise ZozoHandoffError("The garment has no sewing edges.")
+        raise ZozoHandoffError(msg("zozo_no_seams"))
 
     parts = [part.obj for part in ranges]
     positions = np.concatenate([_world_vertices(part) for part in parts])
     if not np.all(np.isfinite(positions)):
-        raise ZozoHandoffError("The cloth contains a non-finite vertex position.")
+        raise ZozoHandoffError(msg("zozo_nonfinite"))
     if seams.min() < 0 or seams.max() >= len(positions):
-        raise ZozoHandoffError("The sewing pairs do not match the current panel vertices.")
+        raise ZozoHandoffError(msg("zozo_seam_mismatch"))
     gaps = np.linalg.norm(positions[seams[:, 0]] - positions[seams[:, 1]], axis=1)
     seam_distance_max = float(np.max(gaps))
 

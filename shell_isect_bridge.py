@@ -54,6 +54,8 @@ import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
+from .i18n import msg
+
 
 REQUIRED_MAJOR = 0
 REQUIRED_MINOR = 10
@@ -117,32 +119,42 @@ class ShellIsectReport:
 
     def version_suffix(self) -> str:
         """Trailing token for status messages (always present when known)."""
-        mode = "cloth+body" if self.include_body else "cloth-only"
+        mode = msg("shell_mode_both" if self.include_body else "shell_mode_cloth")
         if self.version:
             return f"shell-isect {self.version} {mode}"
-        return f"shell-isect unavailable {mode}"
+        return f"{msg('shell_unavailable')} {mode}"
 
     def pipeline_token(self) -> str:
         """Short stage summary for status / custom properties."""
         if not self.available:
             return "unavailable"
         if self.checks_run <= 1 and self.pairs_before == 0:
-            return "check1=0 (clean; fix skipped)"
-        return (
-            f"check1={self.pairs_before} fix={self.fix_status} "
-            f"check2={self.pairs_after}"
+            return msg("shell_pipeline_clean")
+        return msg(
+            "shell_pipeline",
+            before=self.pairs_before,
+            fix=self.fix_status,
+            after=self.pairs_after,
         )
 
     def summary(self) -> str:
         if not self.available:
             return f"shell-isect: {self.message}"
-        mode = "cloth+body" if self.include_body else "cloth-only"
+        mode = msg("shell_mode_both" if self.include_body else "shell_mode_cloth")
         crop = ""
         if self.include_body and self.body_faces_total:
-            crop = (
-                f", body {self.body_faces_tested}/{self.body_faces_total} tris"
+            crop = msg(
+                "shell_crop",
+                tested=self.body_faces_tested,
+                total=self.body_faces_total,
             )
-        return f"shell-isect {self.version} ({mode}{crop}): {self.pipeline_token()}"
+        return msg(
+            "shell_summary",
+            version=self.version,
+            mode=mode,
+            crop=crop,
+            pipeline=self.pipeline_token(),
+        )
 
     def _format_face(self, index: int) -> str:
         n = self.n_cloth_faces
@@ -153,22 +165,21 @@ class ShellIsectReport:
     def error_report(self) -> str:
         """User-facing NG text for the status box (no internal tool names)."""
         if not self.available:
-            return (
-                f"ERROR: self-intersection check unavailable ({self.message}) "
-                f"[{self.version_suffix()}]"
+            return msg(
+                "shell_err_unavailable",
+                message=self.message,
+                suffix=self.version_suffix(),
             )
         if self.pairs_before < 0 or self.pairs_after < 0:
-            return (
-                f"ERROR: self-intersection check failed ({self.message}) "
-                f"[{self.version_suffix()}]"
+            return msg(
+                "shell_err_failed",
+                message=self.message,
+                suffix=self.version_suffix(),
             )
-        # e.g. ERROR: self-intersection check1=1 fix=NOOP check2=1 face_pairs: ...
-        text = (
-            "ERROR: self-intersection (tri-tri face pairs): "
-            f"{self.pipeline_token()}"
-        )
+        faces = ""
         if self.n_cloth_faces > 0:
-            text += f" cloth_faces=0..{self.n_cloth_faces - 1}"
+            faces = msg("shell_faces_range", last=self.n_cloth_faces - 1)
+        pairs_txt = ""
         if self.pairs:
             shown = self.pairs[:_MAX_REPORT_PAIRS]
             pair_txt = ", ".join(
@@ -176,9 +187,14 @@ class ShellIsectReport:
             )
             if self.pairs_after > len(shown):
                 pair_txt += f", ... (+{self.pairs_after - len(shown)} more)"
-            text += f" face_pairs: {pair_txt}"
-        text += f" [{self.version_suffix()}]"
-        return text
+            pairs_txt = msg("shell_face_pairs", pairs=pair_txt)
+        return msg(
+            "shell_err_pairs",
+            pipeline=self.pipeline_token(),
+            faces=faces,
+            pairs=pairs_txt,
+            suffix=self.version_suffix(),
+        )
 
 
 _lib = None

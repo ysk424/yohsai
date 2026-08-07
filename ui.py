@@ -21,7 +21,7 @@ from bpy.types import (
     PropertyGroup,
 )
 
-from .i18n import translations_dict
+from .i18n import msg, translations_dict
 from .kitsuke import KitsukeError, adapt_seam_counts
 from . import ppf_zero_gravity
 from .ppf_zero_gravity import SETTLE_FRAMES, SEWING_FRAMES, sew_zero_gravity
@@ -66,13 +66,15 @@ def _version() -> str:
 
 def _wrap_status_lines(text: str, width: int = 52) -> list[str]:
     """Split status text into panel lines (no icons; message box only)."""
-    raw = (text or "").strip() or "Ready"
+    ready = msg("ready")
+    raw = (text or "").strip() or ready
     lines: list[str] = []
     for paragraph in raw.replace("\r\n", "\n").split("\n"):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
         while len(paragraph) > width:
+            # Prefer breaking on spaces; for Japanese text without spaces, cut hard.
             cut = paragraph.rfind(" ", 0, width)
             if cut < width // 2:
                 cut = width
@@ -80,7 +82,7 @@ def _wrap_status_lines(text: str, width: int = 52) -> list[str]:
             paragraph = paragraph[cut:].lstrip()
         if paragraph:
             lines.append(paragraph)
-    return lines or ["Ready"]
+    return lines or [ready]
 
 
 def _draw_status_box(layout, props) -> None:
@@ -150,13 +152,13 @@ def _update_select_lock_mode(properties, _context) -> None:
         for obj in targets:
             obj[LOCKED_OBJECT_KEY] = True
         if targets:
-            properties.parse_status = (
-                f"Select Lock on: locked {len(targets)} selected clothes part(s)."
+            properties.parse_status = msg(
+                "select_lock_on_locked_update", n=len(targets)
             )
         else:
-            properties.parse_status = "Select Lock on: select clothes part(s) to lock."
+            properties.parse_status = msg("select_lock_on_hint")
     else:
-        properties.parse_status = "Select Lock off."
+        properties.parse_status = msg("select_lock_off")
 
 
 def _lock_scope_collections(properties, objects: list[Object]) -> list[Collection]:
@@ -197,14 +199,16 @@ def _toggle_select_lock(properties) -> None:
     objects = _selected_mesh_objects()
     targets = _selection_lock_targets(properties)
     if not objects or not targets:
-        properties.parse_status = "Select clothes part(s) before Select Lock."
+        properties.parse_status = msg("select_lock_need_parts")
         return
     if properties.select_lock_mode:
         # Mode off: unlock the current selection (same attribute as before).
         properties.select_lock_mode = False
         for obj in targets:
             obj[LOCKED_OBJECT_KEY] = False
-        properties.parse_status = f"Select Lock off: unlocked {len(targets)} selected part(s)."
+        properties.parse_status = msg(
+            "select_lock_off_unlocked", n=len(targets)
+        )
         return
     # Mode on: Existing Lock must be off, then lock selection.
     if properties.auto_lock:
@@ -212,7 +216,7 @@ def _toggle_select_lock(properties) -> None:
     properties.select_lock_mode = True
     for obj in targets:
         obj[LOCKED_OBJECT_KEY] = True
-    properties.parse_status = f"Select Lock on: locked {len(targets)} selected part(s)."
+    properties.parse_status = msg("select_lock_on_locked", n=len(targets))
 
 
 def _parser_data_dir() -> str:
@@ -288,9 +292,13 @@ def _poll_svg_parser() -> float | None:
         if _parse_action == "UPDATE":
             clothes_collection = bpy.data.collections.get(_parse_collection_name) if _parse_collection_name else None
             sewing_changed, vertex_count = update_clothes_mesh(bpy.context, clothes_collection, validated_document)
-            message = f"Updated {clothes_collection.name}: {vertex_count} vertices"
+            message = msg(
+                "updated_mesh",
+                name=clothes_collection.name,
+                n=vertex_count,
+            )
             if sewing_changed:
-                message += "; Sewing will rebuild on Zero GRAVITY"
+                message += msg("updated_sewing_rebuild")
             _set_parse_status(message)
         else:
             clothes_collection = create_clothes_mesh(bpy.context, validated_document)
@@ -299,11 +307,17 @@ def _poll_svg_parser() -> float | None:
                 scene.yohsai.auto_lock = True
                 _apply_auto_lock_all(scene.yohsai)
             part_count = sum(obj.get("yohsai_role") == "part" for obj in clothes_collection.objects)
-            _set_parse_status(f"Loaded {clothes_collection.name}: {part_count} part(s); Auto lock on")
+            _set_parse_status(
+                msg(
+                    "loaded_parts",
+                    name=clothes_collection.name,
+                    n=part_count,
+                )
+            )
         _loaded_pattern_json = validated_document
     except Exception as exc:
-        operation = "Update" if _parse_action == "UPDATE" else "Load"
-        _set_parse_status(f"{operation} failed: {str(exc).strip()[:240]}")
+        key = "update_failed" if _parse_action == "UPDATE" else "load_failed"
+        _set_parse_status(msg(key, exc=str(exc).strip()[:240]))
     finally:
         _parse_process = None
         _parse_scene_name = None
@@ -438,16 +452,13 @@ def _ensure_zozo_mcp_server(
     deadline = time.time() + max(0.5, float(wait_s))
     while time.time() < deadline:
         if _port_open(actual):
-            return actual, f"MCP started on :{actual}"
+            return actual, msg("mcp_started", port=actual)
         if actual != port and _port_open(port):
-            return int(port), f"MCP started on :{port}"
+            return int(port), msg("mcp_started", port=port)
         time.sleep(0.1)
 
     detail = "; ".join(errors) if errors else "port did not open"
-    raise RuntimeError(
-        f"Could not start ZOZO MCP on :{port} ({detail}). "
-        "Enable ZOZO Contact Solver and use MCP Start, then Prepare again."
-    )
+    raise RuntimeError(msg("mcp_start_fail", port=port, detail=detail))
 
 
 def _poll_zozo_mcp() -> float | None:
@@ -459,7 +470,7 @@ def _poll_zozo_mcp() -> float | None:
         return 0.2
 
     stdout, stderr = process.communicate()
-    summary = _zozo_prepared_summary or "Prepared the ZOZO hand-off mesh"
+    summary = _zozo_prepared_summary or msg("prepared_default")
     try:
         lines = [line for line in stdout.splitlines() if line.strip()]
         result = json.loads(lines[-1]) if lines else {}
@@ -468,21 +479,27 @@ def _poll_zozo_mcp() -> float | None:
                 str(result.get("message") or stderr.strip() or "ZOZO MCP setup failed.")
             )
             _set_zozo_status(
-                f"{summary}; ZOZO MCP setup failed: {diagnostic[:200]}"
+                msg("mcp_setup_failed", summary=summary, detail=diagnostic[:200])
             )
         else:
             capture = str(result.get("capture", "not needed"))
             connection = str(result.get("connection", "")).strip()
             conn_note = f"; {connection}" if connection else ""
             _set_zozo_status(
-                f"{summary}; ZOZO MCP ready ({capture}){conn_note}. "
-                "Use Transfer, then Run Simulation."
+                msg(
+                    "mcp_ready",
+                    summary=summary,
+                    capture=capture,
+                    conn=conn_note,
+                )
             )
     except Exception as exc:
         diagnostic = _fix_windows_mojibake(
             stderr.strip() or stdout.strip() or str(exc)
         )
-        _set_zozo_status(f"{summary}; ZOZO MCP response failed: {diagnostic[:200]}")
+        _set_zozo_status(
+            msg("mcp_response_failed", summary=summary, detail=diagnostic[:200])
+        )
     finally:
         _zozo_process = None
         _zozo_scene_name = None
@@ -607,21 +624,21 @@ class YOHSAI_OT_load_svg(Operator):
     def execute(self, context):
         global _parse_process, _parse_scene_name, _parse_svg_path, _parse_action, _parse_collection_name
         if _parse_process is not None and _parse_process.poll() is None:
-            self.report({"WARNING"}, "A pattern is already being loaded.")
+            self.report({"WARNING"}, msg("load_already"))
             return {"CANCELLED"}
 
         raw_path = context.scene.yohsai.svg_path
         if not raw_path:
-            self.report({"ERROR"}, "Select a PDF pattern file first.")
+            self.report({"ERROR"}, msg("load_need_pdf"))
             return {"CANCELLED"}
         svg_path = str(Path(bpy.path.abspath(raw_path)).resolve())
         if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() != ".pdf":
-            self.report({"ERROR"}, "Pattern Path must point to an existing .pdf file.")
+            self.report({"ERROR"}, msg("load_need_pdf_file"))
             return {"CANCELLED"}
 
         parser_path = Path(__file__).with_name(_PARSER_FILENAME)
         if not parser_path.is_file():
-            self.report({"ERROR"}, f"Parser program is missing: {_PARSER_FILENAME}")
+            self.report({"ERROR"}, msg("parser_missing", name=_PARSER_FILENAME))
             return {"CANCELLED"}
         try:
             python_path = _bundled_python()
@@ -639,14 +656,14 @@ class YOHSAI_OT_load_svg(Operator):
                 env=_parser_environment(),
             )
         except Exception as exc:
-            self.report({"ERROR"}, f"Could not start pattern parser: {exc}")
+            self.report({"ERROR"}, msg("parser_start_failed", exc=exc))
             return {"CANCELLED"}
 
         _parse_scene_name = context.scene.name
         _parse_svg_path = svg_path
         _parse_action = "LOAD"
         _parse_collection_name = None
-        context.scene.yohsai.parse_status = "Loading..."
+        context.scene.yohsai.parse_status = msg("loading")
         if not bpy.app.timers.is_registered(_poll_svg_parser):
             bpy.app.timers.register(_poll_svg_parser, first_interval=0.2)
         return {"FINISHED"}
@@ -661,24 +678,24 @@ class YOHSAI_OT_update_svg(Operator):
     def execute(self, context):
         global _parse_process, _parse_scene_name, _parse_svg_path, _parse_action, _parse_collection_name
         if _parse_process is not None and _parse_process.poll() is None:
-            self.report({"WARNING"}, "A pattern is already being processed.")
+            self.report({"WARNING"}, msg("update_already"))
             return {"CANCELLED"}
         props = context.scene.yohsai
         collection = props.clothes_collection
         if collection is None or collection.get("yohsai_role") != "clothes":
-            self.report({"ERROR"}, "Select a loaded Clothes collection before Update.")
+            self.report({"ERROR"}, msg("update_need_clothes"))
             return {"CANCELLED"}
         raw_path = props.svg_path
         if not raw_path:
-            self.report({"ERROR"}, "Select the original PDF file first.")
+            self.report({"ERROR"}, msg("update_need_pdf"))
             return {"CANCELLED"}
         svg_path = str(Path(bpy.path.abspath(raw_path)).resolve())
         if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() != ".pdf":
-            self.report({"ERROR"}, "Pattern Path must point to the existing source .pdf file.")
+            self.report({"ERROR"}, msg("update_need_pdf_file"))
             return {"CANCELLED"}
         source_path = str(Path(str(collection.get("yohsai_source_svg", ""))).resolve())
         if os.path.normcase(svg_path) != os.path.normcase(source_path):
-            self.report({"ERROR"}, "Update must use the same pattern file that created the selected Clothes collection.")
+            self.report({"ERROR"}, msg("update_same_pdf"))
             return {"CANCELLED"}
         parser_path = Path(__file__).with_name(_PARSER_FILENAME)
         try:
@@ -697,13 +714,13 @@ class YOHSAI_OT_update_svg(Operator):
                 env=_parser_environment(),
             )
         except Exception as exc:
-            self.report({"ERROR"}, f"Could not start pattern parser: {exc}")
+            self.report({"ERROR"}, msg("parser_start_failed", exc=exc))
             return {"CANCELLED"}
         _parse_scene_name = context.scene.name
         _parse_svg_path = svg_path
         _parse_action = "UPDATE"
         _parse_collection_name = collection.name
-        props.parse_status = "Updating..."
+        props.parse_status = msg("updating")
         if not bpy.app.timers.is_registered(_poll_svg_parser):
             bpy.app.timers.register(_poll_svg_parser, first_interval=0.2)
         return {"FINISHED"}
@@ -723,7 +740,7 @@ def _prepare_sewing(context, collection) -> tuple[Object, ...]:
     )
     if sewing_required:
         if not pending_parts and len(participating_parts(collection)) < 2:
-            raise KitsukeError("Move at least two connected pattern parts before pressing GRAVITY.")
+            raise KitsukeError(msg("zero_g_need_parts"))
         # Each new pending stage gets sewing connections from its current
         # Object Mode placement.  Completed parts remain in the plan as
         # locked anchors when Auto is on.  A changed Update signature also
@@ -742,9 +759,9 @@ def _run_zero_gravity(operator: Operator, context):
     pending_parts: tuple[Object, ...] = ()
     try:
         if collection is None or collection.get("yohsai_role") != "clothes":
-            raise KitsukeError("No loaded Yohsai clothes collection is selected.")
+            raise KitsukeError(msg("zero_g_need_clothes"))
         if props.body_object is None:
-            raise KitsukeError("Select a mesh Body before pressing Zero GRAVITY.")
+            raise KitsukeError(msg("zero_g_need_body"))
 
         pending_parts = _prepare_sewing(context, collection)
         remove_sewn_preview(collection, reveal_parts=True)
@@ -752,7 +769,7 @@ def _run_zero_gravity(operator: Operator, context):
         mark_pending_parts_done(pending_parts)
     except Exception as exc:
         message = str(exc).strip() or type(exc).__name__
-        props.parse_status = f"Zero GRAVITY failed: {message[:240]}"
+        props.parse_status = msg("zero_g_failed", exc=message[:240])
         operator.report({"ERROR"}, message)
         return {"CANCELLED"}
     props.parse_status = message
@@ -800,7 +817,7 @@ class YOHSAI_OT_prepare_zozo(Operator):
         global _zozo_process, _zozo_scene_name, _zozo_prepared_summary
         props = context.scene.yohsai
         if _zozo_process is not None and _zozo_process.poll() is None:
-            self.report({"WARNING"}, "ZOZO MCP configuration is already running.")
+            self.report({"WARNING"}, msg("prepare_mcp_running"))
             return {"CANCELLED"}
         try:
             prepared = prepare_for_zozo(
@@ -815,14 +832,26 @@ class YOHSAI_OT_prepare_zozo(Operator):
             message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
             # Status box only — never self.report ERROR (avoids レポート:エラー).
             ver = library_version()
-            suffix = f" [shell-isect {ver}]" if ver else " [shell-isect unavailable]"
-            props.parse_status = f"Prepare for ZOZO stopped: {message}{suffix}"
+            suffix = (
+                msg("shell_suffix", ver=ver)
+                if ver
+                else msg("shell_suffix_missing")
+            )
+            props.parse_status = msg(
+                "prepare_stopped", message=message, suffix=suffix
+            )
             return {"CANCELLED"}
         except Exception as exc:
             message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
             ver = library_version()
-            suffix = f" [shell-isect {ver}]" if ver else " [shell-isect unavailable]"
-            props.parse_status = f"Prepare for ZOZO failed: {message}{suffix}"
+            suffix = (
+                msg("shell_suffix", ver=ver)
+                if ver
+                else msg("shell_suffix_missing")
+            )
+            props.parse_status = msg(
+                "prepare_failed", message=message, suffix=suffix
+            )
             return {"CANCELLED"}
 
         shell_suffix = f" [{prepared.shell_isect.version_suffix()}]"
@@ -830,23 +859,29 @@ class YOHSAI_OT_prepare_zozo(Operator):
         # shell-isect NG and other soft stops: status box only, no MCP / no report.
         if prepared.abort_message:
             # error_report already ends with [shell-isect x.y.z]
-            props.parse_status = f"Prepare for ZOZO stopped: {prepared.abort_message}"
+            props.parse_status = msg(
+                "prepare_stopped",
+                message=prepared.abort_message,
+                suffix="",
+            )
             return {"CANCELLED"}
 
         # Self-intersection and triangle quality are both gated above; MCP only.
         recut = (
-            f"re-cut {len(prepared.remeshed_parts)} panel(s); "
+            msg("prepare_recut", n=len(prepared.remeshed_parts))
             if prepared.remeshed_parts
             else ""
         )
         quality_note = (
             f"; {prepared.quality.summary()}" if prepared.quality is not None else ""
         )
-        summary = (
-            f"{recut}prepared {prepared.seam_count} ZOZO stitches "
-            f"(widest seam still open {prepared.seam_distance_max_m * 1000.0:.2f} mm)"
-            + shell_suffix
-            + quality_note
+        summary = msg(
+            "prepare_summary",
+            recut=recut,
+            seams=prepared.seam_count,
+            gap_mm=prepared.seam_distance_max_m * 1000.0,
+            shell=shell_suffix,
+            quality=quality_note,
         )
         try:
             mcp_port, mcp_note = _ensure_zozo_mcp_server(ZOZO_MCP_PORT)
@@ -872,15 +907,20 @@ class YOHSAI_OT_prepare_zozo(Operator):
             _zozo_scene_name = context.scene.name
             _zozo_prepared_summary = summary
             # Status box only — no operator report icon for prepare success/warnings.
-            props.parse_status = (
-                f"{summary}; {mcp_note}; configuring ZOZO MCP on :{mcp_port}..."
+            props.parse_status = msg(
+                "prepare_mcp_configuring",
+                summary=summary,
+                mcp_note=mcp_note,
+                port=mcp_port,
             )
             if not bpy.app.timers.is_registered(_poll_zozo_mcp):
                 bpy.app.timers.register(_poll_zozo_mcp, first_interval=0.2)
         except Exception as exc:
             message = _fix_windows_mojibake(str(exc).strip() or type(exc).__name__)
-            props.parse_status = (
-                f"{summary}; copies are ready, but MCP could not start: {message[:240]}"
+            props.parse_status = msg(
+                "prepare_mcp_start_fail",
+                summary=summary,
+                exc=message[:240],
             )
         return {"FINISHED"}
 
